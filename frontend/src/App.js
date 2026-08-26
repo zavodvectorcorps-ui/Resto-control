@@ -11,6 +11,7 @@ import Printers from "@/pages/admin/Printers";
 import Staff from "@/pages/admin/Staff";
 import Reports from "@/pages/admin/Reports";
 import Clients from "@/pages/admin/Clients";
+import Loyalty from "@/pages/admin/Loyalty";
 import Pos from "@/pages/pos/Pos";
 
 function Protected({ roles, children }) {
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="printers" element={<Printers />} />
           <Route path="staff" element={<Staff />} />
           <Route path="clients" element={<Clients />} />
+          <Route path="loyalty" element={<Loyalty />} />
           <Route path="reports" element={<Reports />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -17,6 +17,9 @@ const TABS = [
   ["category", "Категории / Цеха"],
   ["abc", "ABC-анализ"],
   ["warehouse", "Склад"],
+  ["hall", "Залы"],
+  ["promo", "Акции"],
+  ["loyalty", "Лояльность"],
   ["corrections", "Удаления"],
 ];
 
@@ -71,6 +74,21 @@ export default function Reports() {
     queryKey: ["corrections", start, end],
     queryFn: async () => (await api.get(`/reports/corrections${range}`)).data,
     enabled: tab === "corrections",
+  });
+  const { data: byHall = {} } = useQuery({
+    queryKey: ["by-hall", start, end],
+    queryFn: async () => (await api.get(`/reports/by-hall${range}`)).data,
+    enabled: tab === "hall",
+  });
+  const { data: promoRep = {} } = useQuery({
+    queryKey: ["rep-promotions", start, end],
+    queryFn: async () => (await api.get(`/reports/promotions${range}`)).data,
+    enabled: tab === "promo",
+  });
+  const { data: loyaltyRep = {} } = useQuery({
+    queryKey: ["rep-loyalty", start, end],
+    queryFn: async () => (await api.get(`/reports/loyalty${range}`)).data,
+    enabled: tab === "loyalty",
   });
   const [whFilter, setWhFilter] = useState("");
   const { data: invReport = {} } = useQuery({
@@ -377,6 +395,62 @@ export default function Reports() {
               </div>
             </Card>
           </div>
+        </div>
+      )}
+
+      {tab === "hall" && (
+        <Card data-testid="report-panel-hall">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-head text-lg font-bold">Продажи по залам</h3>
+            <span className="text-sm text-[#A1A1AA]">Итого: <span className="text-[#00E676] tabnum">{money(byHall.total)}</span></span>
+          </div>
+          <table className="w-full text-sm">
+            <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
+              <th className="text-left p-3">Зал</th><th className="text-right p-3">Заказов</th><th className="text-right p-3">Выручка</th></tr></thead>
+            <tbody>
+              {(byHall.rows || []).map((r, i) => (
+                <tr key={i} className="border-b border-[#1A1A1A]" data-testid={`hall-row-${i}`}>
+                  <td className="p-3 font-medium">{r.hall}</td>
+                  <td className="p-3 text-right tabnum text-[#A1A1AA]">{r.order_count}</td>
+                  <td className="p-3 text-right tabnum text-[#00E676]">{money(r.revenue)}</td>
+                </tr>
+              ))}
+              {(byHall.rows || []).length === 0 && <tr><td colSpan="3" className="p-6 text-center text-[#52525B]">Нет данных</td></tr>}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      {tab === "promo" && (
+        <Card data-testid="report-panel-promo">
+          <h3 className="font-head text-lg font-bold mb-4">Эффективность акций</h3>
+          <table className="w-full text-sm">
+            <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
+              <th className="text-left p-3">Акция</th><th className="text-right p-3">Применений</th><th className="text-right p-3">Скидка</th><th className="text-right p-3">Выручка</th><th className="text-right p-3">ROI</th></tr></thead>
+            <tbody>
+              {(promoRep.rows || []).map((r, i) => (
+                <tr key={i} className="border-b border-[#1A1A1A]" data-testid={`promo-row-${i}`}>
+                  <td className="p-3 font-medium">{r.name}</td>
+                  <td className="p-3 text-right tabnum text-[#A1A1AA]">{r.times_applied}</td>
+                  <td className="p-3 text-right tabnum text-[#FF3B30]">{money(r.discount_value)}</td>
+                  <td className="p-3 text-right tabnum text-[#00E676]">{money(r.revenue)}</td>
+                  <td className="p-3 text-right tabnum text-[#FF5A00]">{r.roi != null ? `${r.roi}×` : "—"}</td>
+                </tr>
+              ))}
+              {(promoRep.rows || []).length === 0 && <tr><td colSpan="5" className="p-6 text-center text-[#52525B]">Акции не применялись</td></tr>}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      {tab === "loyalty" && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6" data-testid="report-panel-loyalty">
+          {[["Начислено бонусов", loyaltyRep.total_accrued, "#00E676"], ["Списано бонусов", loyaltyRep.total_redeemed, "#FF3B30"], ["Остаток на счетах", loyaltyRep.outstanding_balance, "#00E5FF"]].map(([l, v, c], i) => (
+            <Card key={i}>
+              <div className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA] mb-3">{l}</div>
+              <div className="font-head text-2xl font-extrabold tabnum" style={{ color: c }}>{money(v)}</div>
+            </Card>
+          ))}
         </div>
       )}
 

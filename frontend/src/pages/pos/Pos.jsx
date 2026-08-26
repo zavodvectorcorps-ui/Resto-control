@@ -39,12 +39,14 @@ export default function Pos() {
   const [clientPhone, setClientPhone] = useState("");
   const [client, setClient] = useState(null);
   const [discountSource, setDiscountSource] = useState(null);
+  const [bonusRedeem, setBonusRedeem] = useState("");
 
   const { data: shift, refetch: refetchShift } = useQuery({ queryKey: ["shift"], queryFn: async () => (await api.get("/shifts/current")).data });
   const { data: tables = [], refetch: refetchTables } = useQuery({ queryKey: ["pos-tables"], queryFn: async () => (await api.get("/tables")).data });
   const { data: categories = [] } = useQuery({ queryKey: ["categories"], queryFn: async () => (await api.get("/categories")).data });
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: async () => (await api.get("/products")).data });
   const { data: modGroups = [] } = useQuery({ queryKey: ["modifier-groups"], queryFn: async () => (await api.get("/modifier-groups")).data });
+  const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: async () => (await api.get("/settings")).data });
 
   const cat = activeCat || categories[0]?.id;
   const shownProducts = useMemo(
@@ -241,10 +243,11 @@ export default function Pos() {
         payment_method: pay, discount: Number(discount),
         client_id: client?.id || null,
         discount_source: discountSource || (Number(discount) > 0 ? "manual" : null),
+        bonus_redeem_amount: Number(bonusRedeem || 0),
       });
       setReceipt(data);
       setCheckout(false);
-      setDiscount(0); setClient(null); setClientPhone(""); setDiscountSource(null);
+      setDiscount(0); setClient(null); setClientPhone(""); setDiscountSource(null); setBonusRedeem("");
       store.clear();
       setView("tables");
       refetchTables();
@@ -447,6 +450,14 @@ export default function Pos() {
                     <span className="text-[#A1A1AA]">скидка {client.discount_percent}%</span>
                   </div>
                 )}
+                {client && Number(client.bonus_balance) > 0 && (
+                  <div className="mt-2" data-testid="bonus-block">
+                    <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA]">Списать бонусы (доступно {Number(client.bonus_balance).toFixed(2)})</label>
+                    <input type="number" value={bonusRedeem} onChange={(e) => setBonusRedeem(e.target.value)} data-testid="bonus-redeem-input"
+                      placeholder="0"
+                      className="w-full mt-1 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 outline-none focus:border-[#00E676]" />
+                  </div>
+                )}
               </div>
               <div>
                 <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA]">Скидка (₽)</label>
@@ -470,8 +481,21 @@ export default function Pos() {
               </div>
               <div className="flex justify-between text-2xl font-head font-extrabold pt-2 border-t border-[#27272A]">
                 <span>К оплате</span>
-                <span className="tabnum text-[#FF5A00]">{money(Math.max(0, subtotal - Number(discount)))}</span>
+                <span className="tabnum text-[#FF5A00]" data-testid="pay-total">{(() => {
+                  const afterDisc = Math.max(0, subtotal - Number(discount || 0));
+                  const maxPct = settings?.max_bonus_payment_percent ?? 50;
+                  const cap = Math.round(afterDisc * maxPct) / 100;
+                  const bonus = client ? Math.min(Number(bonusRedeem || 0), Number(client.bonus_balance || 0), cap) : 0;
+                  return money(Math.max(0, afterDisc - bonus));
+                })()}</span>
               </div>
+              {client && Number(bonusRedeem) > 0 && (() => {
+                const afterDisc = Math.max(0, subtotal - Number(discount || 0));
+                const maxPct = settings?.max_bonus_payment_percent ?? 50;
+                const cap = Math.round(afterDisc * maxPct) / 100;
+                const bonus = Math.min(Number(bonusRedeem || 0), Number(client.bonus_balance || 0), cap);
+                return <p className="text-xs text-[#00E676] -mt-2" data-testid="bonus-applied-hint">Будет списано {money(bonus)} бонусов (лимит {maxPct}% от чека){bonus < Number(bonusRedeem) ? ", введённая сумма ограничена" : ""}</p>;
+              })()}
               <button onClick={doPay} data-testid="confirm-pay-btn"
                 className="w-full bg-[#FF5A00] hover:bg-[#E04F00] text-white rounded-lg py-4 font-semibold text-lg active:scale-95 transition-transform">
                 Принять оплату

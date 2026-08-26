@@ -29,8 +29,10 @@ export default function Inventory() {
 
   const saveItem = async () => {
     try {
-      await api.post("/inventory", { name: form.name, measure: form.measure || "kg", balance: Number(form.balance || 0), cost: Number(form.cost || 0), warehouse_id: form.warehouse_id || warehouses[0]?.id });
-      toast.success("Позиция добавлена"); setModal(null); setForm({}); refresh();
+      const body = { name: form.name, measure: form.measure || "kg", balance: Number(form.balance || 0), cost: Number(form.cost || 0), warehouse_id: form.warehouse_id || warehouses[0]?.id, processing_loss: form.processing_loss || null };
+      if (form.id) await api.put(`/inventory/${form.id}`, body);
+      else await api.post("/inventory", body);
+      toast.success(form.id ? "Позиция обновлена" : "Позиция добавлена"); setModal(null); setForm({}); refresh();
     } catch (e) { toast.error(apiErr(e)); }
   };
   const delItem = async (id) => { await api.delete(`/inventory/${id}`); refresh(); };
@@ -144,7 +146,10 @@ export default function Inventory() {
                 </td>
                 <td className={`p-4 text-right tabnum font-semibold ${q <= 0 ? "text-[#FF3B30]" : "text-white"}`}>{Number(q).toFixed(2)} {measureLabel[i.measure]}</td>
                 <td className="p-4 text-right tabnum text-[#A1A1AA]">{money(i.cost)}</td>
-                <td className="p-4 text-right"><button onClick={() => delItem(i.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-inv-${i.id}`}><Trash2 size={16} /></button></td>
+                <td className="p-4 text-right"><div className="flex gap-3 justify-end">
+                  <button onClick={() => { setForm({ id: i.id, name: i.name, measure: i.measure, cost: i.cost, processing_loss: i.processing_loss || {} }); setModal("item"); }} className="text-[#A1A1AA] hover:text-white text-xs" data-testid={`edit-inv-${i.id}`}>Изм.</button>
+                  <button onClick={() => delItem(i.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-inv-${i.id}`}><Trash2 size={16} /></button>
+                </div></td>
               </tr>);
             })}</tbody>
           </>}
@@ -174,17 +179,32 @@ export default function Inventory() {
       </div>
       )}
 
-      <Modal open={modal === "item"} onClose={() => setModal(null)} title="Новая позиция склада">
+      <Modal open={modal === "item"} onClose={() => setModal(null)} title={form.id ? "Изменить позицию склада" : "Новая позиция склада"}>
         <div className="space-y-4">
           <Field label="Название" value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="inv-name-input" />
           <div className="grid grid-cols-2 gap-4">
-            <Field label="Начальный остаток" type="number" value={form.balance || ""} onChange={(e) => setForm({ ...form, balance: e.target.value })} data-testid="inv-balance-input" />
+            {!form.id && <Field label="Начальный остаток" type="number" value={form.balance || ""} onChange={(e) => setForm({ ...form, balance: e.target.value })} data-testid="inv-balance-input" />}
             <Field label="Себестоимость" type="number" value={form.cost || ""} onChange={(e) => setForm({ ...form, cost: e.target.value })} data-testid="inv-cost-input" />
           </div>
-          <SelectField label="Склад для остатка" value={form.warehouse_id || ""} onChange={(e) => setForm({ ...form, warehouse_id: e.target.value })}
-            options={warehouses.map((w) => ({ value: w.id, label: w.name }))} data-testid="inv-warehouse-select" />
+          {!form.id && (
+            <SelectField label="Склад для остатка" value={form.warehouse_id || ""} onChange={(e) => setForm({ ...form, warehouse_id: e.target.value })}
+              options={warehouses.map((w) => ({ value: w.id, label: w.name }))} data-testid="inv-warehouse-select" />
+          )}
           <SelectField label="Ед. измерения" value={form.measure || "kg"} onChange={(e) => setForm({ ...form, measure: e.target.value })}
             options={[{ value: "kg", label: "кг" }, { value: "l", label: "л" }, { value: "pcs", label: "шт" }]} />
+          <div>
+            <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA] block mb-2">Потери при обработке, % (брутто→нетто)</label>
+            <div className="grid grid-cols-5 gap-2">
+              {[["cold", "Хол."], ["boil", "Вар."], ["fry", "Жар."], ["stew", "Туш."], ["bake", "Зап."]].map(([k, l]) => (
+                <div key={k}>
+                  <div className="text-[10px] text-[#52525B] text-center mb-1">{l}</div>
+                  <input type="number" value={(form.processing_loss || {})[k] ?? ""} data-testid={`loss-${k}-input`}
+                    onChange={(e) => setForm({ ...form, processing_loss: { ...(form.processing_loss || {}), [k]: Number(e.target.value) } })}
+                    className="w-full bg-[#0A0A0A] border border-[#27272A] rounded-lg px-2 py-2 text-sm text-center outline-none focus:border-[#FF5A00]" />
+                </div>
+              ))}
+            </div>
+          </div>
           <Btn onClick={saveItem} className="w-full" data-testid="save-inv-btn">Сохранить</Btn>
         </div>
       </Modal>

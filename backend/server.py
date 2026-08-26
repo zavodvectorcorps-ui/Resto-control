@@ -9,7 +9,7 @@ import re
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, BeforeValidator, ConfigDict, field_validator
+from pydantic import BaseModel, Field, BeforeValidator, ConfigDict, field_validator, model_validator
 from typing import List, Optional, Annotated, Any
 from datetime import datetime, timezone, timedelta, date
 from bson import ObjectId
@@ -270,6 +270,8 @@ class ProductReq(BaseModel):
     for_sale: bool = True
     recipe: List[RecipeIngredient] = []
     modifier_group_ids: List[str] = []
+    yield_g: Optional[float] = None
+    preparation_notes: Optional[str] = ""
 
 
 class TableReq(BaseModel):
@@ -327,6 +329,7 @@ class PaymentReq(BaseModel):
     discount: float = 0.0
     client_id: Optional[str] = None
     discount_source: Optional[str] = None
+    bonus_redeem_amount: float = 0.0
 
 
 class SupplierReq(BaseModel):
@@ -338,6 +341,55 @@ class ClientReq(BaseModel):
     name: str
     phone: str
     discount_percent: float = 0.0
+    loyalty_group_id: Optional[str] = None
+
+
+class BonusAdjustReq(BaseModel):
+    amount: float
+    note: Optional[str] = ""
+
+
+class LoyaltyGroupReq(BaseModel):
+    name: str
+    type: str = "bonus"  # bonus | discount
+    value_percent: float = 0.0
+
+    @field_validator("type")
+    @classmethod
+    def _valid_type(cls, v):
+        if v not in ("bonus", "discount"):
+            raise ValueError("type must be 'bonus' or 'discount'")
+        return v
+
+
+class PromotionReq(BaseModel):
+    name: str
+    active: bool = True
+    weekdays: List[int] = []  # 0=Mon..6=Sun; [] = все дни
+    time_from: Optional[str] = None  # HH:MM
+    time_to: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    condition_items: List[dict] = []  # [{product_id?, category_id?, min_qty}]
+    result_type: str = "discount_percent"  # discount_percent | free_item | bonus_item
+    result_value: float = 0.0
+    result_product_id: Optional[str] = None  # для free_item/bonus_item
+    auto_apply: bool = True
+    stackable: bool = False
+
+    @field_validator("result_type")
+    @classmethod
+    def _valid_result(cls, v):
+        if v not in ("discount_percent", "free_item", "bonus_item"):
+            raise ValueError("invalid result_type")
+        return v
+
+    @field_validator("weekdays")
+    @classmethod
+    def _valid_weekdays(cls, v):
+        if any(d < 0 or d > 6 for d in v):
+            raise ValueError("weekdays must be 0..6")
+        return v
 
 
 class InventoryItemReq(BaseModel):
@@ -346,6 +398,7 @@ class InventoryItemReq(BaseModel):
     balance: float = 0.0
     cost: float = 0.0
     warehouse_id: Optional[str] = None  # склад для начального остатка (по умолчанию — дефолтный)
+    processing_loss: Optional[dict] = None  # {"cold":5,"boil":10,"fry":15,"stew":8,"bake":12} (%)
 
 
 class InvoiceItemReq(BaseModel):
@@ -443,6 +496,7 @@ class ReceiptSettingsReq(BaseModel):
     address: Optional[str] = None
     phone: Optional[str] = None
     footer_note: Optional[str] = None
+    max_bonus_payment_percent: Optional[float] = None
 
 
 class SplitReq(BaseModel):
@@ -576,6 +630,71 @@ async def recompute_products_for_ingredients(rid, inventory_ids):
         await db.products.update_one({"_id": p["_id"]}, {"$set": {"cost": c}})
 
 
+def _to_grams(amount, unit):
+    u = (unit or "").lower()
+    if u in ("kg", "l"):
+        return amount * 1000
+    if u in ("g", "ml"):
+        return amount
+    return 0.0
+
+
+async def compute_yield_g(rid, recipe):
+    total = 0.0
+    for ing in recipe or []:
+        if not ObjectId.is_valid(ing.get("inventory_id", "")):
+            continue
+        inv = await db.inventory.find_one({"_id": ObjectId(ing["inventory_id"]), "restaurant_id": rid})
+        loss = 0.0
+        m = ing.get("processing_method")
+        if m and inv and inv.get("processing_loss"):
+            loss = inv["processing_loss"].get(m, 0) or 0
+        grams = _to_grams(ing["amount"], ing.get("unit") or (inv.get("measure") if inv else None))
+        total += grams * (1 - loss / 100)
+    return round(total, 1) if total > 0 else None
+
+
+def promo_is_active(p, when):
+    if not p.get("active"):
+        return False
+    if p.get("weekdays") and when.weekday() not in p["weekdays"]:
+        return False
+    d = when.date().isoformat()
+    if p.get("date_from") and d < p["date_from"]:
+        return False
+    if p.get("date_to") and d > p["date_to"]:
+        return False
+    t = when.strftime("%H:%M")
+    tf, tt = p.get("time_from"), p.get("time_to")
+    if tf and tt:
+        if tf <= tt:
+            if not (tf <= t <= tt):
+                return False
+        else:  # окно через полночь (напр. 22:00–02:00)
+            if not (t >= tf or t <= tt):
+                return False
+    elif tf and t < tf:
+        return False
+    elif tt and t > tt:
+        return False
+    return True
+
+
+def promo_conditions_met(p, items, prod_cat):
+    for c in (p.get("condition_items") or []):
+        need = c.get("min_qty", 1)
+        got = 0
+        for it in items:
+            pid = it.get("product_id")
+            if c.get("product_id") and pid == c["product_id"]:
+                got += it["count"]
+            elif c.get("category_id") and prod_cat.get(pid) == c["category_id"]:
+                got += it["count"]
+        if got < need:
+            return False
+    return True
+
+
 
 # ----- Restaurants (Мультитенантность) -----
 @api.get("/restaurants")
@@ -587,6 +706,15 @@ async def get_restaurants(user: dict = Depends(get_current_user)):
 async def current_restaurant(user: dict = Depends(get_current_user)):
     r = await db.restaurants.find_one({"_id": parse_oid(user["restaurant_id"])}) if user.get("restaurant_id") else None
     return serialize(r) if r else None
+
+
+@api.post("/restaurants/switch/{target_rid}")
+async def switch_restaurant(target_rid: str, user: dict = Depends(require_roles("manager"))):
+    r = await db.restaurants.find_one({"_id": parse_oid(target_rid)})
+    if not r:
+        raise HTTPException(status_code=404, detail="Заведение не найдено")
+    token = create_token(user["id"], user["role"], target_rid)
+    return {"token": token, "restaurant_id": target_rid, "restaurant_name": r.get("name")}
 
 
 @api.post("/restaurants")
@@ -658,6 +786,8 @@ async def create_product(req: ProductReq, user: dict = Depends(require_roles("ma
     doc = {**req.model_dump(), "restaurant_id": rid, "created_at": iso(now_utc())}
     if doc.get("cost_source") == "auto":
         doc["cost"] = await compute_product_cost(rid, doc.get("recipe", []))
+    if req.yield_g is None:
+        doc["yield_g"] = await compute_yield_g(rid, doc.get("recipe", []))
     res = await db.products.insert_one(doc)
     return serialize(await db.products.find_one({"_id": res.inserted_id}))
 
@@ -668,6 +798,8 @@ async def update_product(pid: str, req: ProductReq, user: dict = Depends(require
     upd = req.model_dump()
     if upd.get("cost_source") == "auto":
         upd["cost"] = await compute_product_cost(rid, upd.get("recipe", []))
+    if req.yield_g is None:
+        upd["yield_g"] = await compute_yield_g(rid, upd.get("recipe", []))
     await db.products.update_one({"_id": parse_oid(pid), "restaurant_id": rid}, {"$set": upd})
     return serialize(await db.products.find_one({"_id": parse_oid(pid), "restaurant_id": rid}))
 
@@ -1062,32 +1194,78 @@ async def send_order(oid: str, user: dict = Depends(get_current_user)):
 
 @api.post("/orders/{oid}/pay")
 async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_roles("admin"))):
-    o = await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]})
+    rid = user["restaurant_id"]
+    o = await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": rid})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     if o["status"] == "closed":
         raise HTTPException(status_code=400, detail="Заказ уже оплачен")
-    total = round(o["subtotal"] - req.discount, 2)
     subtotal = o.get("subtotal", 0) or 0
+
+    # --- Акции: авто-применение к заказу ---
+    items = list(o.get("items", []))
+    prods = await db.products.find({"restaurant_id": rid}).to_list(3000)
+    prod_cat = {str(p["_id"]): p.get("category_id") for p in prods}
+    prod_name = {str(p["_id"]): p.get("name") for p in prods}
+    now = now_utc()
+    applied_promotions = []
+    promo_discount = 0.0
+    promos = await db.promotions.find({"restaurant_id": rid, "active": True, "auto_apply": True}).to_list(500)
+    promos = [p for p in promos if promo_is_active(p, now) and promo_conditions_met(p, items, prod_cat)]
+    for p in promos:
+        if applied_promotions and not p.get("stackable"):
+            break
+        if p.get("result_type") == "discount_percent":
+            amt = round(subtotal * (p.get("result_value", 0)) / 100, 2)
+            promo_discount += amt
+            applied_promotions.append({"promotion_id": str(p["_id"]), "name": p["name"], "discount_amount": amt})
+        elif p.get("result_type") in ("free_item", "bonus_item"):
+            fpid = p.get("result_product_id")
+            fname = prod_name.get(fpid, p["name"])
+            items.append({"product_id": fpid, "name": f"{fname} (акция)", "price": 0.0,
+                          "count": 1, "workshop_id": None, "print_status": "pending",
+                          "selected_modifiers": [], "total": 0.0})
+            applied_promotions.append({"promotion_id": str(p["_id"]), "name": p["name"], "discount_amount": 0.0})
+
+    total = round(subtotal - req.discount - promo_discount, 2)
     discount_percent = round(req.discount / subtotal * 100, 2) if subtotal else 0.0
     client_id = req.client_id or o.get("client_id")
     client_name = ""
     discount_source = req.discount_source
+    cl = None
     if client_id:
-        cl = await db.clients.find_one({"_id": parse_oid(client_id), "restaurant_id": user["restaurant_id"]})
+        cl = await db.clients.find_one({"_id": parse_oid(client_id), "restaurant_id": rid})
         if cl:
             client_name = cl.get("name", "")
             if not discount_source and req.discount > 0:
                 discount_source = f"client:{client_name}"
     if not discount_source and req.discount > 0:
         discount_source = "manual"
+
+    # --- Бонусы: списание ---
+    bonus_redeemed = 0.0
+    if req.bonus_redeem_amount and cl:
+        settings = await db.settings.find_one({"key": "venue"}) or {}
+        max_pct = settings.get("max_bonus_payment_percent") or 50
+        cap = round(total * max_pct / 100, 2)
+        bonus_redeemed = round(min(req.bonus_redeem_amount, cl.get("bonus_balance", 0) or 0, cap), 2)
+        if bonus_redeemed < 0:
+            bonus_redeemed = 0.0
+    total = round(total - bonus_redeemed, 2)
+    if total < 0:
+        total = 0.0
+
     await db.orders.update_one(
-        {"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]},
+        {"_id": parse_oid(oid), "restaurant_id": rid},
         {"$set": {
             "status": "closed",
+            "items": items,
             "discount": req.discount,
             "discount_percent": discount_percent,
             "discount_source": discount_source,
+            "promo_discount": round(promo_discount, 2),
+            "applied_promotions": applied_promotions,
+            "bonus_redeemed": bonus_redeemed,
             "client_id": client_id,
             "client_name": client_name,
             "total": total,
@@ -1097,8 +1275,29 @@ async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_role
             "closed_at": iso(now_utc()),
         }},
     )
+
+    # --- Бонусы: транзакции списания и начисления (кэшбэк) ---
+    if cl:
+        bal = cl.get("bonus_balance", 0) or 0
+        if bonus_redeemed > 0:
+            bal = round(bal - bonus_redeemed, 2)
+            await db.loyalty_transactions.insert_one({
+                "client_id": client_id, "order_id": oid, "type": "redemption",
+                "amount": bonus_redeemed, "balance_after": bal, "staff_id": user["id"],
+                "restaurant_id": rid, "created_at": iso(now_utc())})
+        lg = await db.loyalty_groups.find_one(
+            {"_id": parse_oid(cl["loyalty_group_id"]), "restaurant_id": rid}) if cl.get("loyalty_group_id") else None
+        if lg and lg.get("type") == "bonus" and lg.get("value_percent"):
+            cashback = round(total * lg["value_percent"] / 100, 2)
+            if cashback > 0:
+                bal = round(bal + cashback, 2)
+                await db.loyalty_transactions.insert_one({
+                    "client_id": client_id, "order_id": oid, "type": "accrual",
+                    "amount": cashback, "balance_after": bal, "staff_id": user["id"],
+                    "restaurant_id": rid, "created_at": iso(now_utc())})
+        await db.clients.update_one({"_id": parse_oid(client_id), "restaurant_id": rid}, {"$set": {"bonus_balance": bal}})
+
     # auto write-off ingredients by recipe (тех.карты) — со склада цеха блюда
-    rid = user["restaurant_id"]
     for it in o["items"]:
         pid = it.get("product_id", "")
         if not ObjectId.is_valid(pid):
@@ -1248,7 +1447,8 @@ async def get_inventory(user: dict = Depends(get_current_user)):
 async def create_inventory(req: InventoryItemReq, user: dict = Depends(require_roles("manager"))):
     rid = user["restaurant_id"]
     doc = {"name": req.name, "measure": req.measure, "cost": req.cost,
-           "balance": 0.0, "restaurant_id": rid, "created_at": iso(now_utc())}
+           "balance": 0.0, "processing_loss": req.processing_loss,
+           "restaurant_id": rid, "created_at": iso(now_utc())}
     res = await db.inventory.insert_one(doc)
     iid = str(res.inserted_id)
     if req.balance:
@@ -1262,7 +1462,8 @@ async def update_inventory(iid: str, req: InventoryItemReq, user: dict = Depends
     rid = user["restaurant_id"]
     await db.inventory.update_one(
         {"_id": parse_oid(iid), "restaurant_id": rid},
-        {"$set": {"name": req.name, "measure": req.measure, "cost": req.cost}})
+        {"$set": {"name": req.name, "measure": req.measure, "cost": req.cost,
+                  "processing_loss": req.processing_loss}})
     await recompute_products_for_ingredients(rid, [iid])
     return serialize(await db.inventory.find_one({"_id": parse_oid(iid), "restaurant_id": rid}))
 
@@ -1314,7 +1515,8 @@ async def create_client(req: ClientReq, user: dict = Depends(get_current_user)):
     digits = "".join(ch for ch in req.phone if ch.isdigit())
     if await db.clients.find_one({"restaurant_id": rid, "phone_digits": digits}):
         raise HTTPException(status_code=400, detail="Клиент с таким телефоном уже существует")
-    doc = {**req.model_dump(), "phone_digits": digits, "restaurant_id": rid, "created_at": iso(now_utc())}
+    doc = {**req.model_dump(), "phone_digits": digits, "bonus_balance": 0.0,
+           "restaurant_id": rid, "created_at": iso(now_utc())}
     res = await db.clients.insert_one(doc)
     return serialize(await db.clients.find_one({"_id": res.inserted_id}))
 
@@ -1338,6 +1540,107 @@ async def delete_client(cid: str, user: dict = Depends(require_roles("manager"))
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Клиент не найден")
     return {"success": True}
+
+
+@api.post("/clients/{cid}/bonus")
+async def adjust_bonus(cid: str, req: BonusAdjustReq, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    cl = await db.clients.find_one({"_id": parse_oid(cid), "restaurant_id": rid})
+    if not cl:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+    new_bal = round((cl.get("bonus_balance", 0) or 0) + req.amount, 2)
+    if new_bal < 0:
+        new_bal = 0.0
+    await db.clients.update_one({"_id": parse_oid(cid), "restaurant_id": rid}, {"$set": {"bonus_balance": new_bal}})
+    await db.loyalty_transactions.insert_one({
+        "client_id": cid, "order_id": None, "type": "manual_adjustment",
+        "amount": req.amount, "balance_after": new_bal, "note": req.note,
+        "staff_id": user["id"], "restaurant_id": rid, "created_at": iso(now_utc())})
+    return {"bonus_balance": new_bal}
+
+
+@api.get("/clients/{cid}/transactions")
+async def client_transactions(cid: str, user: dict = Depends(get_current_user)):
+    docs = await db.loyalty_transactions.find(
+        {"client_id": cid, "restaurant_id": user["restaurant_id"]}).sort("created_at", -1).to_list(500)
+    return [serialize(d) for d in docs]
+
+
+# ----- Loyalty groups (Задача 6) -----
+@api.get("/loyalty-groups")
+async def get_loyalty_groups(user: dict = Depends(get_current_user)):
+    return await list_docs("loyalty_groups", sort=[("name", 1)], rid=user["restaurant_id"])
+
+
+@api.post("/loyalty-groups")
+async def create_loyalty_group(req: LoyaltyGroupReq, user: dict = Depends(require_roles("manager"))):
+    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
+    res = await db.loyalty_groups.insert_one(doc)
+    return serialize(await db.loyalty_groups.find_one({"_id": res.inserted_id}))
+
+
+@api.put("/loyalty-groups/{lid}")
+async def update_loyalty_group(lid: str, req: LoyaltyGroupReq, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    grp = await db.loyalty_groups.find_one({"_id": parse_oid(lid), "restaurant_id": rid})
+    if not grp:
+        raise HTTPException(status_code=404, detail="Группа лояльности не найдена")
+    await db.loyalty_groups.update_one({"_id": parse_oid(lid), "restaurant_id": rid}, {"$set": req.model_dump()})
+    return serialize(await db.loyalty_groups.find_one({"_id": parse_oid(lid), "restaurant_id": rid}))
+
+
+@api.delete("/loyalty-groups/{lid}")
+async def delete_loyalty_group(lid: str, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    res = await db.loyalty_groups.delete_one({"_id": parse_oid(lid), "restaurant_id": rid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Группа лояльности не найдена")
+    await db.clients.update_many({"restaurant_id": rid, "loyalty_group_id": lid}, {"$set": {"loyalty_group_id": None}})
+    return {"success": True}
+
+
+# ----- Promotions (Акции, Задача 6) -----
+@api.get("/promotions")
+async def get_promotions(user: dict = Depends(get_current_user)):
+    return await list_docs("promotions", sort=[("name", 1)], rid=user["restaurant_id"])
+
+
+@api.get("/promotions/active")
+async def get_active_promotions(user: dict = Depends(get_current_user)):
+    rid = user["restaurant_id"]
+    now = now_utc()
+    promos = await db.promotions.find({"restaurant_id": rid, "active": True}).to_list(500)
+    return [serialize(p) for p in promos if promo_is_active(p, now)]
+
+
+@api.post("/promotions")
+async def create_promotion(req: PromotionReq, user: dict = Depends(require_roles("manager"))):
+    if req.result_type == "discount_percent" and not (0 <= req.result_value <= 100):
+        raise HTTPException(status_code=400, detail="Процент скидки должен быть в диапазоне 0–100")
+    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
+    res = await db.promotions.insert_one(doc)
+    return serialize(await db.promotions.find_one({"_id": res.inserted_id}))
+
+
+@api.put("/promotions/{pmid}")
+async def update_promotion(pmid: str, req: PromotionReq, user: dict = Depends(require_roles("manager"))):
+    if req.result_type == "discount_percent" and not (0 <= req.result_value <= 100):
+        raise HTTPException(status_code=400, detail="Процент скидки должен быть в диапазоне 0–100")
+    rid = user["restaurant_id"]
+    pr = await db.promotions.find_one({"_id": parse_oid(pmid), "restaurant_id": rid})
+    if not pr:
+        raise HTTPException(status_code=404, detail="Акция не найдена")
+    await db.promotions.update_one({"_id": parse_oid(pmid), "restaurant_id": rid}, {"$set": req.model_dump()})
+    return serialize(await db.promotions.find_one({"_id": parse_oid(pmid), "restaurant_id": rid}))
+
+
+@api.delete("/promotions/{pmid}")
+async def delete_promotion(pmid: str, user: dict = Depends(require_roles("manager"))):
+    res = await db.promotions.delete_one({"_id": parse_oid(pmid), "restaurant_id": user["restaurant_id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Акция не найдена")
+    return {"success": True}
+
 
 
 
@@ -1739,6 +2042,70 @@ async def report_stock_movement(warehouse_id: Optional[str] = None,
             "warehouses": [{"id": k, "name": v} for k, v in warehouses.items()]}
 
 
+@api.get("/reports/by-hall")
+async def report_by_hall(start: Optional[str] = None, end: Optional[str] = None,
+                         user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    closed = await _closed_in_range(start, end, rid)
+    tables = {str(t["_id"]): t.get("hall", "—") for t in await db.tables.find({"restaurant_id": rid}).to_list(2000)}
+    agg = {}
+    for o in closed:
+        hall = tables.get(o.get("table_id"), "Без зала")
+        a = agg.setdefault(hall, {"hall": hall, "order_count": 0, "revenue": 0.0})
+        a["order_count"] += 1
+        a["revenue"] += o.get("total", 0)
+    rows = sorted(agg.values(), key=lambda x: x["revenue"], reverse=True)
+    for r in rows:
+        r["revenue"] = round(r["revenue"], 2)
+    return {"rows": rows, "total": round(sum(r["revenue"] for r in rows), 2)}
+
+
+@api.get("/reports/promotions")
+async def report_promotions(start: Optional[str] = None, end: Optional[str] = None,
+                            user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    closed = await _closed_in_range(start, end, rid)
+    agg = {}
+    for o in closed:
+        for ap in (o.get("applied_promotions") or []):
+            a = agg.setdefault(ap["promotion_id"], {"name": ap.get("name", ""), "times": 0,
+                                                     "discount_value": 0.0, "revenue": 0.0})
+            a["times"] += 1
+            a["discount_value"] += ap.get("discount_amount", 0)
+            a["revenue"] += o.get("total", 0)
+    rows = []
+    for pid, a in agg.items():
+        roi = round(a["revenue"] / a["discount_value"], 2) if a["discount_value"] else None
+        rows.append({"promotion_id": pid, "name": a["name"], "times_applied": a["times"],
+                     "discount_value": round(a["discount_value"], 2),
+                     "revenue": round(a["revenue"], 2), "roi": roi})
+    rows.sort(key=lambda r: r["times_applied"], reverse=True)
+    return {"rows": rows}
+
+
+@api.get("/reports/loyalty")
+async def report_loyalty(start: Optional[str] = None, end: Optional[str] = None,
+                         user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    txns = await db.loyalty_transactions.find({"restaurant_id": rid}).to_list(50000)
+
+    def in_range(ts):
+        d = (ts or "")[:10]
+        if start and d < start:
+            return False
+        if end and d > end:
+            return False
+        return True
+
+    accrued = sum(t["amount"] for t in txns if t.get("type") == "accrual" and in_range(t.get("created_at")))
+    redeemed = sum(t["amount"] for t in txns if t.get("type") == "redemption" and in_range(t.get("created_at")))
+    clients = await db.clients.find({"restaurant_id": rid}).to_list(20000)
+    outstanding = sum(c.get("bonus_balance", 0) or 0 for c in clients)
+    return {"total_accrued": round(accrued, 2), "total_redeemed": round(redeemed, 2),
+            "outstanding_balance": round(outstanding, 2)}
+
+
+
 
 
 
@@ -1948,12 +2315,17 @@ async def get_settings(user: dict = Depends(get_current_user)):
         "address": doc.get("address", ""),
         "phone": doc.get("phone", ""),
         "footer_note": doc.get("footer_note", ""),
+        "max_bonus_payment_percent": doc.get("max_bonus_payment_percent", 50),
     }
 
 
 @api.put("/settings/receipt")
 async def set_receipt(req: ReceiptSettingsReq, user: dict = Depends(require_roles("manager"))):
-    update = {k: (v or "") for k, v in req.model_dump().items() if v is not None}
+    update = {}
+    for k, v in req.model_dump().items():
+        if v is None:
+            continue
+        update[k] = v if k == "max_bonus_payment_percent" else (v or "")
     await db.settings.update_one({"key": "venue"}, {"$set": {"key": "venue", **update}}, upsert=True)
     doc = await db.settings.find_one({"key": "venue"})
     return {"name": doc.get("name", ""), "address": doc.get("address", ""),
@@ -2513,7 +2885,30 @@ async def seed():
     if await db.clients.count_documents({"restaurant_id": default_rid}) == 0:
         await db.clients.insert_one({
             "name": "Иван Петров", "phone": "+7 900 123-45-67", "phone_digits": "79001234567",
-            "discount_percent": 10.0, "restaurant_id": default_rid, "created_at": iso(now_utc())})
+            "discount_percent": 10.0, "bonus_balance": 100.0, "restaurant_id": default_rid, "created_at": iso(now_utc())})
+
+    # --- Задача 6: демо группа лояльности, привязка и акция (идемпотентно) ---
+    await db.clients.update_many(
+        {"restaurant_id": default_rid, "bonus_balance": {"$exists": False}}, {"$set": {"bonus_balance": 0.0}})
+    if await db.loyalty_groups.count_documents({"restaurant_id": default_rid}) == 0:
+        lg = await db.loyalty_groups.insert_one({
+            "name": "Бонусный клуб", "type": "bonus", "value_percent": 5.0,
+            "restaurant_id": default_rid, "created_at": iso(now_utc())})
+        await db.clients.update_many(
+            {"restaurant_id": default_rid, "name": "Иван Петров"},
+            {"$set": {"loyalty_group_id": str(lg.inserted_id)}})
+    if await db.promotions.count_documents({"restaurant_id": default_rid}) == 0:
+        await db.promotions.insert_one({
+            "name": "Счастливые часы −15%", "active": True, "weekdays": [],
+            "time_from": "14:00", "time_to": "17:00", "date_from": None, "date_to": None,
+            "condition_items": [], "result_type": "discount_percent", "result_value": 15.0,
+            "result_product_id": None, "auto_apply": True, "stackable": False,
+            "restaurant_id": default_rid, "created_at": iso(now_utc())})
+
+    # settings: дефолтный лимит оплаты бонусами
+    await db.settings.update_one(
+        {"key": "venue", "max_bonus_payment_percent": {"$exists": False}},
+        {"$set": {"max_bonus_payment_percent": 50}})
 
 
     # Мультитенантность: бэкфилл restaurant_id на все существующие/сид-документы, где его нет

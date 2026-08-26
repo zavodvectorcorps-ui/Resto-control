@@ -1,8 +1,10 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useState, useEffect } from "react";
 import { useAuth } from "@/context/AuthContext";
+import api from "@/lib/api";
 import {
   LayoutDashboard, UtensilsCrossed, Factory, Grid3x3, Warehouse,
-  Users, BarChart3, LogOut, ChefHat, Monitor, Printer, Contact,
+  Users, BarChart3, LogOut, ChefHat, Monitor, Printer, Contact, Gift,
 } from "lucide-react";
 
 const items = [
@@ -14,12 +16,29 @@ const items = [
   { to: "/admin/printers", icon: Printer, label: "Печать" },
   { to: "/admin/staff", icon: Users, label: "Сотрудники" },
   { to: "/admin/clients", icon: Contact, label: "Клиенты" },
+  { to: "/admin/loyalty", icon: Gift, label: "Лояльность" },
   { to: "/admin/reports", icon: BarChart3, label: "Отчёты" },
 ];
 
 export default function AdminLayout() {
   const { user, logout } = useAuth();
   const nav = useNavigate();
+  const [restaurants, setRestaurants] = useState([]);
+  const [currentRid, setCurrentRid] = useState("");
+
+  useEffect(() => {
+    api.get("/restaurants").then((r) => setRestaurants(r.data)).catch(() => {});
+    api.get("/restaurants/current").then((r) => setCurrentRid(r.data?.id || "")).catch(() => {});
+  }, []);
+
+  const switchRestaurant = async (rid) => {
+    if (!rid || rid === currentRid) return;
+    try {
+      const { data } = await api.post(`/restaurants/switch/${rid}`);
+      localStorage.setItem("resto_token", data.token);
+      window.location.reload();
+    } catch (e) { /* ignore */ }
+  };
 
   return (
     <div className="min-h-screen bg-[#0A0A0A]">
@@ -30,6 +49,14 @@ export default function AdminLayout() {
           </div>
           <span className="font-head text-lg font-extrabold">RestoControl</span>
         </div>
+        {restaurants.length > 1 && (
+          <div className="px-3 pt-3">
+            <select value={currentRid} onChange={(e) => switchRestaurant(e.target.value)} data-testid="restaurant-switcher"
+              className="w-full bg-[#121212] border border-[#27272A] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#FF5A00]">
+              {restaurants.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+            </select>
+          </div>
+        )}
         <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
           {items.map((it) => (
             <NavLink

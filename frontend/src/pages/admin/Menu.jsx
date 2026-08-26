@@ -48,6 +48,8 @@ export default function Menu() {
         recipe[i] = { ...recipe[i], inventory_id: value, name: inv?.name || "", unit: inv?.measure || "pcs" };
       } else if (field === "unit") {
         recipe[i] = { ...recipe[i], unit: value };
+      } else if (field === "processing_method") {
+        recipe[i] = { ...recipe[i], processing_method: value };
       } else {
         recipe[i] = { ...recipe[i], amount: value };
       }
@@ -63,8 +65,9 @@ export default function Menu() {
         cost_source: form.cost_source || "manual",
         measure: form.measure, category_id: form.category_id, workshop_id: form.workshop_id,
         for_sale: form.for_sale ?? true, image: form.image || null,
-        recipe: (form.recipe || []).map((r) => ({ inventory_id: r.inventory_id, name: r.name, amount: Number(r.amount), unit: r.unit || null })),
+        recipe: (form.recipe || []).map((r) => ({ inventory_id: r.inventory_id, name: r.name, amount: Number(r.amount), unit: r.unit || null, processing_method: r.processing_method || null })),
         modifier_group_ids: form.modifier_group_ids || [],
+        preparation_notes: form.preparation_notes || "",
       };
       if (editing) await api.put(`/products/${editing.id}`, body);
       else await api.post("/products", body);
@@ -210,10 +213,25 @@ export default function Menu() {
                     className="w-16 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-2 py-2 text-sm outline-none focus:border-[#FF5A00]" data-testid={`ingredient-unit-${i}`}>
                     {unitOptions(inventory.find((x) => x.id === r.inventory_id)?.measure).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                   </select>
+                  <select value={r.processing_method || ""} onChange={(e) => updateIngredient(i, "processing_method", e.target.value)} data-testid={`ingredient-method-${i}`}
+                    className="w-20 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-2 py-2 text-sm outline-none focus:border-[#FF5A00]">
+                    <option value="">обр.</option>
+                    <option value="cold">хол.</option>
+                    <option value="boil">вар.</option>
+                    <option value="fry">жар.</option>
+                    <option value="stew">туш.</option>
+                    <option value="bake">зап.</option>
+                  </select>
                   <button onClick={() => removeIngredient(i)} className="text-[#A1A1AA] hover:text-[#FF3B30]"><Trash2 size={16} /></button>
                 </div>
               ))}
             </div>
+            {form.yield_g != null && <p className="text-xs text-[#52525B] mt-2" data-testid="yield-display">Выход блюда (нетто, авто): <span className="text-[#00E5FF]">{form.yield_g} г</span> — пересчитается при сохранении</p>}
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA] block mb-2">Заметки для кухни</label>
+            <textarea value={form.preparation_notes || ""} onChange={(e) => setForm({ ...form, preparation_notes: e.target.value })} data-testid="prep-notes-input" rows="2"
+              className="w-full bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 outline-none focus:border-[#FF5A00] text-sm" />
           </div>
           <div className="border-t border-[#27272A] pt-4">
             <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA] block mb-2">Группы модификаторов</label>

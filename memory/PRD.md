@@ -82,6 +82,14 @@
 - Скидка по клиенту: pay принимает client_id + discount + discount_source; на заказе сохраняются discount_percent, discount_source, client_id, client_name. Отчёт `/reports/sales?group_by=client` (заказы/выручка/скидки по клиенту).
 - Фронт: Menu.jsx (вкладка «Модификаторы» с CRUD групп/опций, тумблеры групп в редакторе блюда, «обязательный выбор» для single), POS Pos.jsx (пикер модификаторов с min/max, кнопка блокируется при незаполненном обязательном, модификаторы в корзине и чеке, поиск клиента по телефону + автоскидка + источник), Clients.jsx (новая страница + nav «Клиенты»), Reports.jsx (тумблер «По клиентам»).
 
+## Implemented (2026-06 — Фаза 2: Задачи 6, 7, 8 + переключатель заведений) ✅ протестировано (iteration_12; регрессия 248 passed)
+- **Задача 6 Бонусы/акции:** `loyalty_groups` (type bonus|discount, value_percent) + CRUD; `promotions` (окна: weekdays/time/date, condition_items min_qty, result_type discount_percent|free_item|bonus_item, auto_apply, stackable) + CRUD + `/promotions/active`; `clients.bonus_balance` + `loyalty_group_id`; `POST /clients/{id}/bonus` (+транзакция, пол ≥0), `GET /clients/{id}/transactions`. pay_order: авто-акции (скидка %/бесплатное блюдо, non-stackable стоп после первой), списание бонусов (кап = min(баланс, max_bonus_payment_percent% чека, запрос)), кэшбэк по группе bonus. Настройка `max_bonus_payment_percent` в /settings. Валидации: result_value 0–100 (400), result_type/type/weekdays (422), overnight-окно (wrap-around), delete unknown→404.
+- **Задача 7 Брутто/нетто:** `inventory.processing_loss` {cold/boil/fry/stew/bake %}, `recipe.processing_method`, `product.yield_g` (авто = Σ нетто грамм, ручной override; null если нет весовых), `preparation_notes`. Себестоимость остаётся по брутто.
+- **Задача 8 Отчёты:** `/reports/by-hall` (по Table.hall), `/reports/promotions` (применений/скидка/выручка/ROI), `/reports/loyalty` (начислено/списано/остаток).
+- **Переключатель заведений:** `POST /restaurants/switch/{rid}` → новый JWT; в шапке админки select (виден при >1 заведении).
+- **Фронт:** новая страница Лояльность (группы/акции/лимит бонусов), Clients (бонус-колонка, группа, ± бонус), POS (списание бонусов с капом и корректным «К оплате»), Menu (метод обработки/выход/заметки), Inventory (потери % + редактирование существующих позиций), Reports (вкладки Залы/Акции/Лояльность).
+- Демо: группа «Бонусный клуб» (5% кэшбэк), акция «Счастливые часы −15%» (14:00–17:00), клиент Иван Петров.
+
 ## ОБНОВЛЁННЫЙ БРИФ (q4ubq956) — 16 задач + мультитенантность
 - Архитектурное замечание: заложить restaurant_id во ВСЕ сущности + фильтрацию в db-запросах + в JWT/сессию, дефолтный Restaurant «Мята», миграция. UI-переключатель заведения можно отложить. (НЕ сделано)
 - Задачи 0,1 — ✅ сделаны ранее. Задача 5 — ✅ сделана (кроме stock-movement).
