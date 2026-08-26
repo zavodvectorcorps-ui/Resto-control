@@ -1,0 +1,76 @@
+{
+  "summary": "Full-stack test of RestoControl (restaurant POS/back-office). Backend: created pytest suite (37 tests, 4 files) covering auth/PIN, RBAC, workshops/categories/products/tables/staff CRUD, inventory+invoices+write-offs, and the complete shift->order->kitchen->payment->reports lifecycle. 33/37 pass; 4 real defects (no brute-force lockout, waiter can pay via API, invalid ObjectId -> 500, write-off allows negative stock). Frontend: verified admin login+dashboard(stats+7-day chart), all 7 admin nav pages, product create/edit/delete, category create/delete, workshop, table, staff CRUD, inventory item + incoming invoice (0->12kg) + write-off (12->7kg), full cashier POS flow (PIN 2222: open shift, select table, add items, cart totals, send-to-kitchen with tickets grouped by Кухня/Бар + print preview, cash payment + receipt with ИТОГО, close shift with revenue), order restore on table reselect, waiter PIN 1111 (Оплатить correctly hidden, can send to kitchen), and dashboard/reports reflecting the sale. All core user journeys work.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/orders/{oid}/pay", "issue": "No role check - a waiter token can close and pay an order (returned 200). Only the UI hides the button; Официант Иван already shows up in the 'По кассирам' report with revenue. Wrap with require_roles('cashier','admin').", "priority": "CRITICAL"},
+      {"endpoint": "POST /api/auth/login, POST /api/auth/pin-login", "issue": "No brute-force lockout/rate limiting. 7 consecutive bad passwords and 7 bad PINs all returned 401 with no 429/423. PINs are 4 digits (10k space) and pin-login is unauthenticated - full staff account takeover is trivially brute-forceable. Playbook requires lockout after 5 failures.", "priority": "CRITICAL"},
+      {"endpoint": "GET /api/orders/{oid} (and ~20 other routes using ObjectId(id))", "issue": "Unvalidated ObjectId() raises bson.errors.InvalidId -> 500 Internal Server Error (confirmed in backend.err.log). Applies to every path param route (workshops/categories/products/tables/staff/inventory/orders). Should return 400/404.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/writeoffs", "issue": "No stock validation - writing off 100 from a balance of 2 succeeded (200) leaving balance -98.0. Should reject with 400 or clamp."},
+      {"endpoint": "POST /api/shifts/close", "issue": "Closing a shift does not check for open/sent orders; orders stay open forever and are excluded from the shift Z-report while still being payable afterwards."},
+      {"endpoint": "POST /api/shifts/open", "issue": "Any role (incl. waiter) can open a shift, although only cashier/admin can close it (UI hides close-shift for waiter). Inconsistent RBAC."},
+      {"endpoint": "POST /api/orders", "issue": "No guard against creating a second open order for a table that already has one (API-level; UI reuses the existing order)."},
+      {"endpoint": "POST /api/invoices", "issue": "Empty/omitted price is accepted and overwrites inventory cost with 0.00 (observed via UI). No min-value validation on amount/price."},
+      {"endpoint": "CORS middleware", "issue": "allow_credentials=True combined with allow_origins=['*'] - Starlette drops the credentials header. Harmless with bearer tokens but should be explicit origins per playbook."},
+      {"endpoint": "Auth design", "issue": "Playbook deviation (accepted per main-agent note): tokens in localStorage instead of httpOnly cookies. XSS-exfiltratable; flagging for awareness only."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Toaster (sonner)", "issue": "Success toasts render top-right at z-index above the page header and intercept pointer events, covering the primary action button (e.g. 'Добавить' on Сотрудники, 'Закрыть смену' in POS top bar). Playwright click was blocked by the toast <li> subtree for ~3s. Real users can mis-click during the toast window.", "selector": "[data-sonner-toast] / [data-testid=\"add-staff-btn\"], [data-testid=\"close-shift-btn\"]", "priority": "MEDIUM"},
+      {"component": "Pos.jsx receipt/order header", "issue": "After payment the right panel header shows 'Заказ ·' with an empty table name and the POS stays on the product grid with an empty cart instead of returning to the table map.", "selector": "[data-testid=\"cart-total\"] panel header", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Отчёты (Reports)", "issues": ["Uses native browser date inputs (type=\"date\") rendering US format 08/20/2026 with the browser's default picker instead of a shadcn Calendar/Popover with ru-RU locale - inconsistent with the dark Russian UI"]},
+      {"screen": "Admin pages (Меню/Склад/Сотрудники)", "issues": ["Toast overlaps the header action button area (see ui_bugs)", "Large empty vertical whitespace below short tables/cards; content is not vertically balanced"]},
+      {"screen": "POS product grid", "issues": ["Product cards use a generic cutlery placeholder icon (no images) - acceptable for MVP but visually flat", "Right order panel stays mostly empty; 'Итого 0.00 ₽' with a disabled-looking Оплатить button after payment is ambiguous"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_auth.py",
+    "/app/backend/tests/test_catalog.py",
+    "/app/backend/tests/test_inventory.py",
+    "/app/backend/tests/test_pos_flow.py",
+    "/app/backend/tests/cleanup_test_data.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Add require_roles('cashier','admin') to POST /api/orders/{oid}/pay (waiter currently able to pay).",
+    "Add brute-force protection to /api/auth/login and /api/auth/pin-login (lock after 5 failures, return 429/423); consider 6-digit PINs.",
+    "Add a safe ObjectId parser helper (raise HTTPException 400/404 on InvalidId) and use it in every route that takes an id path param.",
+    "Validate write-off amount against current balance; reject with 400 instead of allowing negative stock.",
+    "Prevent shift close (or auto-handle) when open/sent orders exist; consider blocking payment for orders belonging to a closed shift.",
+    "Move the toaster out of the header click area (or set pointer-events:none / bottom-right position) so it cannot intercept clicks on action buttons.",
+    "Replace native date inputs on Отчёты with the shadcn Calendar/Popover using ru-RU formatting.",
+    "Validate invoice amount/price > 0 so a blank price cannot zero-out inventory cost."
+  ],
+  "critical_code_review_comments": [
+    "server.py (868 lines) is a single module mixing models, auth, 8 resource groups, reports and seed logic - split into routers/ (auth, catalog, orders, inventory, reports) + models.py + seed.py.",
+    "ObjectId(...) is called ~20 times directly on user input with no validation - single biggest source of 500s.",
+    "Payment/shift endpoints only use get_current_user; role enforcement lives only in the React UI (canPay) which is trivially bypassed.",
+    "Inventory mutations use raw $inc with no balance floor and no transaction, so invoice/write-off can desynchronise stock.",
+    "delete_order / delete_* endpoints return {'success': True} even when nothing was deleted - should 404 on deleted_count == 0.",
+    "@app.on_event('startup'/'shutdown') is deprecated in modern FastAPI; migrate to the lifespan context manager."
+  ],
+  "updated_files": [
+    "/app/frontend/src/pages/admin/Dashboard.jsx (added data-testid to the 4 stat cards + values)",
+    "/app/frontend/src/pages/admin/Inventory.jsx (added invoice-price-input, inv-balance-input, inv-cost-input testids)",
+    "/app/frontend/src/pages/pos/Pos.jsx (added tickets-close-btn, print-tickets-btn, checkout-close-btn testids)",
+    "/app/backend/tests/conftest.py",
+    "/app/backend/tests/test_auth.py",
+    "/app/backend/tests/test_catalog.py",
+    "/app/backend/tests/test_inventory.py",
+    "/app/backend/tests/test_pos_flow.py",
+    "/app/backend/tests/cleanup_test_data.py"
+  ],
+  "success_rate": {"backend": "89% (33/37 pytest; 4 genuine defects)", "frontend": "100% of user flows tested passed (2 cosmetic/overlay issues found)"},
+  "seed_data_creation": "No permanent seed data added. All test artifacts prefixed TEST_ / TEST_UI_ and removed; /app/backend/tests/cleanup_test_data.py purges TEST_* docs and stale open/sent orders. Paid TEST orders remain in the orders collection and contribute to today's revenue (109.00 RUB / 6 checks) - delete them if a clean demo is required.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "admin@resto.com / admin123 (admin); PIN 1111 (waiter Иван), PIN 2222 (cashier Мария). Verified working. Admin bcrypt hash correctly starts with $2b$ and seed_admin re-hashes when ADMIN_PASSWORD changes.",
+  "context_for_next_testing_agent": "pytest suite lives in /app/backend/tests (conftest.py builds admin/cashier/waiter sessions from /app/memory/test_credentials.md). IMPORTANT: pytest.ini forces -n 2 --dist loadscope; the POS lifecycle test asserts revenue deltas and WILL flake under parallel run because other workers pay orders concurrently - run `pytest tests/test_pos_flow.py -n 0` for that file. Also run `python tests/cleanup_test_data.py` before the POS test if UI testing left open orders on a table (a stale open order makes the 'table freed after payment' assertion fail). Expected remaining failures until fixed: test_brute_force_lockout, test_pin_bruteforce_lockout, test_waiter_cannot_pay_order, test_invalid_objectid_returns_4xx_not_500, test_writeoff_more_than_balance_rejected. Frontend testids verified: admin nav is nav-menu/nav-workshops/nav-tables/nav-inventory/nav-staff/nav-reports and nav-admin for the dashboard link (NOT nav-dashboard); inventory tabs are inv-tab-stock/invoices/writeoffs.",
+  "rca_of_the_issue": "1) Payment RBAC: pay_order depends on get_current_user only; the cashier-only rule is implemented client-side in Pos.jsx (canPay), so any PIN-authenticated waiter token can POST /orders/{id}/pay. 2) 500s: every id route calls bson ObjectId(str) directly; a non-hex id raises bson.errors.InvalidId, which is unhandled and surfaces as 500 (stack trace confirmed in /var/log/supervisor/backend.err.log). 3) Negative stock: create_writeoff performs $inc: -amount with no pre-check against the current balance. 4) No lockout: login/pin-login have no failed-attempt counter or rate limiter. 5) The single parallel-run failure of test_full_order_lifecycle_and_reports was cross-worker contamination (another worker paid an order between the before/after dashboard reads), not a product bug - it passes deterministically with -n 0."
+}

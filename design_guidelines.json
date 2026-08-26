@@ -1,0 +1,159 @@
+{
+  "theme": "dark",
+  "project_type": "POS/ERP (Hybrid Fullstack)",
+  "language": "Russian",
+  "design_philosophy": "The 'Performance Pro' Archetype. High-contrast, tactical minimalism designed for fast-paced restaurant environments. Emphasizes operational clarity, large touch targets for tablet POS, and dense data visualization for admin. Void Black base with high-visibility Electric Orange and Pure White for immediate action recognition.",
+  "typography": {
+    "font_strategy": "The 'Soft Utility' + 'Technical' Blend. Solid, modern headings combined with highly legible data-friendly body text.",
+    "headings": {
+      "family": "Manrope",
+      "weights": ["600", "800"],
+      "classes": "font-sans tracking-tight"
+    },
+    "body": {
+      "family": "IBM Plex Sans",
+      "weights": ["400", "500", "600"],
+      "classes": "font-sans tracking-normal"
+    },
+    "scale": {
+      "h1": "text-3xl sm:text-4xl lg:text-5xl",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl",
+      "h3": "text-xl sm:text-2xl",
+      "h4": "text-lg sm:text-xl",
+      "body": "text-base",
+      "receipt_data": "text-sm tabular-nums",
+      "labels": "text-xs uppercase tracking-[0.2em]"
+    }
+  },
+  "colors": {
+    "background": {
+      "base": "#0A0A0A",
+      "surface": "#121212",
+      "surface_elevated": "#1A1A1A",
+      "tailwind_classes": "bg-[#0A0A0A] text-white"
+    },
+    "accents": {
+      "primary": {
+        "color": "#FF5A00",
+        "description": "Electric Orange for primary actions like 'Оплатить' (Pay) and active states. Appetizing but highly visible.",
+        "hover": "#E04F00"
+      },
+      "secondary": {
+        "color": "#00E5FF",
+        "description": "Cyan for information mapping, active table indication, and kitchen sync status."
+      },
+      "success": {
+        "color": "#00E676",
+        "description": "Used strictly for successful payments and completed kitchen orders."
+      },
+      "danger": {
+        "color": "#FF3B30",
+        "description": "Used for 'Списание' (Write-offs) and voids."
+      }
+    },
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A1A1AA",
+      "muted": "#52525B"
+    },
+    "borders": {
+      "default": "#27272A",
+      "focus": "#FF5A00"
+    }
+  },
+  "visual_enhancers": {
+    "surface_strategy": "Grid Borders (The Technical Look) for Admin Dashboard. Flat Solid with precise 1px strokes for POS buttons. NO glassmorphism in the POS workflow to maintain absolute visual clarity.",
+    "shadows": "Omit soft shadows in POS. Use solid 1px borders or 2px 'Inner Glow' highlights for active items.",
+    "border_radius": "Subtle roundness. `rounded-lg` (8px) for buttons/cards to feel modern but structured. `rounded-xl` (12px) for large layout panels."
+  },
+  "layouts": {
+    "admin_dashboard": {
+      "structure": "Sidebar + Main Content Area",
+      "sidebar": "w-64 fixed left-0 top-0 h-full border-r border-[#27272A] bg-[#0A0A0A]",
+      "main": "ml-64 p-8 min-h-screen bg-[#0A0A0A]",
+      "grid": "Bento Grid Protocol (High Density). grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6"
+    },
+    "pos_tablet": {
+      "structure": "3-Panel Horizontal Layout (No scrolling on main viewport)",
+      "left_panel": "w-[20%] border-r border-[#27272A] flex flex-col h-screen (Categories & Navigation)",
+      "center_panel": "w-[50%] p-6 flex flex-col h-screen overflow-y-auto (Product Grid: grid-cols-3 or grid-cols-4 gap-4)",
+      "right_panel": "w-[30%] border-l border-[#27272A] bg-[#121212] h-screen flex flex-col (Order Ticket, Actions, Numpad)"
+    },
+    "login_screen": {
+      "structure": "Split screen or modal overlay over dark atmospheric background",
+      "pin_pad": "grid grid-cols-3 gap-4 max-w-sm mx-auto"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-[#FF5A00] text-white rounded-lg px-6 py-4 font-semibold text-lg hover:bg-[#E04F00] active:scale-95 transition-transform flex items-center justify-center",
+      "pos_item": "bg-[#1A1A1A] border border-[#27272A] rounded-lg p-4 flex flex-col items-start gap-2 hover:border-[#FF5A00] active:scale-95 transition-all text-left",
+      "numpad": "bg-[#1A1A1A] border border-[#27272A] rounded-lg text-2xl font-medium h-16 flex items-center justify-center hover:bg-[#27272A] active:scale-95 transition-transform"
+    },
+    "cards": {
+      "admin_bento": "bg-[#121212] border border-[#27272A] rounded-xl p-6 flex flex-col h-full",
+      "receipt_ticket": "bg-white text-black p-4 text-sm font-mono (Used visually to represent the printed receipt in checkout flow)"
+    },
+    "navigation": {
+      "pos_category_active": "border-l-4 border-[#FF5A00] bg-[#1A1A1A] text-white",
+      "pos_category_inactive": "text-[#A1A1AA] hover:bg-[#121212] hover:text-white"
+    }
+  },
+  "motion": {
+    "interactions": "Fast and tactile. Micro-animations on all buttons (`active:scale-95 transition-transform duration-100`).",
+    "lists": "Staggered fade-in for product grids and order items.",
+    "modals": "Slide up from bottom for checkout/payment flow in POS."
+  },
+  "accessibility": {
+    "contrast": "Strict adherence to high contrast. Text over active states must be pure white or pure black. No low-contrast disabled states (use dashed borders or 40% opacity instead).",
+    "touch_targets": "All tappable elements in POS must be at least 56x56px (min-h-14 min-w-14) to accommodate fast tapping on tablets."
+  },
+  "libraries": {
+    "icons": "@phosphor-icons/react (Used for dense, readable UI in both Admin and POS)",
+    "charts": "recharts (For Admin Sales, Revenue, Top Items)",
+    "ui_components": "shadcn/ui (Heavily customized for Dark mode flat styling. Use Table for inventory, Tabs for workshops/цеха)",
+    "routing": "react-router-dom",
+    "state": "zustand (Critical for managing POS cart state globally without prop drilling)"
+  },
+  "media": {
+    "image_urls": {
+      "login_background": {
+        "url": "https://images.pexels.com/photos/13343442/pexels-photo-13343442.jpeg",
+        "description": "Dimly lit restaurant kitchen featuring a chef at work, creating an intimate atmosphere.",
+        "category": "backgrounds"
+      },
+      "product_placeholders": [
+        {
+          "url": "https://images.pexels.com/photos/28902883/pexels-photo-28902883.jpeg",
+          "description": "Gourmet burger dark background",
+          "category": "products"
+        },
+        {
+          "url": "https://images.unsplash.com/photo-1615464637805-16154b4d5ea1?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzB8MHwxfHNlYXJjaHwyfHxsYXR0ZSUyMGFydCUyMGJsYWNrJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3ODc3NjY1Mzh8MA&ixlib=rb-4.1.0&q=85",
+          "description": "Latte art dark background",
+          "category": "products"
+        }
+      ]
+    }
+  },
+  "instructions_to_main_agent": [
+    "Build a Dark Mode exclusive POS/ERP interface. Set `bg-[#0A0A0A] text-white` on the root body.",
+    "Implement two distinct layouts using React Router: `/admin/*` for the Back-Office and `/pos/*` for the Waiter/Cashier Tablet app.",
+    "For the POS interface: NEVER use scrolling on the `body` or `html`. Fix the height to `100vh` and only allow scrolling inside the central Product Grid and the Order Ticket list.",
+    "Use standard HTML/Tailwind for the POS layout (raw divs and grids) for maximum control over touch targets and borders, rather than forcing Shadcn Cards everywhere.",
+    "Use Shadcn components primarily in the Admin Dashboard (Tables for Warehouse/Inventory, Dialogs for Settings, Select for category mapping, Charts for Reports).",
+    "Language is Russian: Use terms like 'Панель управления' (Dashboard), 'Касса' (POS), 'Склад' (Inventory), 'Цеха' (Workshops), 'Сотрудники' (Staff).",
+    "Build a PIN Pad component for the POS login/checkout flow. It must look like a physical keypad.",
+    "Always add `data-testid` to interactive elements (e.g., `data-testid=\"pos-category-burgers\"`, `data-testid=\"pay-button\"`).",
+    "Avoid glassmorphism. Use flat surfaces with crisp 1px borders (`border-[#27272A]`) to separate panes and widgets."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "Do not use generic centered layouts or simplistic gradients.",
+    "Create depth through layered design elements with z-index hierarchy and subtle border colors, not heavy shadows.",
+    "You MUST NOT apply universal transition (e.g., `transition: all`). Use specific transitions like `transition-transform` or `transition-colors`.",
+    "You MUST NOT center align the app container. Do not add `.App { text-align: center; }` in CSS.",
+    "NEVER use AI assistant Emoji characters (🤖🧠💭💡) for icons. Use Phosphor Icons.",
+    "Use 2-3x more spacing in the Admin Dashboard, but keep the POS Tablet interface dense enough to avoid unnecessary scrolling.",
+    "Use `sonner` for toast notifications (e.g., 'Заказ отправлен на кухню' - Order sent to kitchen)."
+  ]
+}
