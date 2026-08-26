@@ -22,7 +22,7 @@ export default function Login() {
       const { data } = await api.post("/auth/pin-login", { pin: value });
       login(data.token, data.user);
       toast.success(`Добро пожаловать, ${data.user.name}`);
-      nav(data.user.role === "admin" ? "/admin" : "/pos");
+      nav(data.user.role === "manager" ? "/admin" : "/pos");
     } catch (e) {
       toast.error(apiErr(e));
       setPin("");
@@ -92,7 +92,7 @@ export default function Login() {
                 mode === "staff" ? "bg-[#FF5A00] text-white" : "text-[#A1A1AA] hover:text-white"
               }`}
             >
-              <Users size={16} /> Официант / Кассир
+              <Users size={16} /> Официант / Администратор
             </button>
             <button
               data-testid="mode-admin-btn"
@@ -101,14 +101,14 @@ export default function Login() {
                 mode === "admin" ? "bg-[#FF5A00] text-white" : "text-[#A1A1AA] hover:text-white"
               }`}
             >
-              <ShieldCheck size={16} /> Администратор
+              <ShieldCheck size={16} /> Менеджер
             </button>
           </div>
 
           {mode === "staff" ? (
             <div>
               <h2 className="font-head text-2xl font-bold mb-1">Введите PIN-код</h2>
-              <p className="text-[#A1A1AA] text-sm mb-6">Демо: официант 1111, кассир 2222</p>
+              <p className="text-[#A1A1AA] text-sm mb-6">Демо: официант 1111, администратор 2222</p>
               <div className="flex justify-center gap-3 mb-8" data-testid="pin-dots">
                 {[0, 1, 2, 3, 4, 5].map((i) => (
                   <div
@@ -155,7 +155,7 @@ export default function Login() {
             </div>
           ) : (
             <form onSubmit={doAdmin}>
-              <h2 className="font-head text-2xl font-bold mb-1">Вход администратора</h2>
+              <h2 className="font-head text-2xl font-bold mb-1">Вход менеджера</h2>
               <p className="text-[#A1A1AA] text-sm mb-6">Демо: admin@resto.com / admin123</p>
               <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA]">Email</label>
               <input

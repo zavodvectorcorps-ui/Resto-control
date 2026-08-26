@@ -17,7 +17,7 @@ function Protected({ roles, children }) {
   if (!ready) return <div className="h-screen flex items-center justify-center text-[#A1A1AA]">Загрузка…</div>;
   if (!user) return <Navigate to="/login" replace />;
   if (roles && !roles.includes(user.role)) {
-    return <Navigate to={user.role === "admin" ? "/admin" : "/pos"} replace />;
+    return <Navigate to={user.role === "manager" ? "/admin" : "/pos"} replace />;
   }
   return children;
 }
@@ -26,7 +26,7 @@ function Root() {
   const { user, ready } = useAuth();
   if (!ready) return null;
   if (!user) return <Navigate to="/login" replace />;
-  return <Navigate to={user.role === "admin" ? "/admin" : "/pos"} replace />;
+  return <Navigate to={user.role === "manager" ? "/admin" : "/pos"} replace />;
 }
 
 export default function App() {
@@ -38,7 +38,7 @@ export default function App() {
         <Route
           path="/pos"
           element={
-            <Protected roles={["waiter", "cashier", "admin"]}>
+            <Protected roles={["waiter", "admin"]}>
               <Pos />
             </Protected>
           }
@@ -46,7 +46,7 @@ export default function App() {
         <Route
           path="/admin"
           element={
-            <Protected roles={["admin"]}>
+            <Protected roles={["manager"]}>
               <AdminLayout />
             </Protected>
           }

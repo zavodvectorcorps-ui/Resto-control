@@ -216,7 +216,8 @@ class TestPrintJobs:
     def test_void_printed_item_creates_void_job(self, cashier, shift, catalog):
         o = _mk_order(cashier, catalog, ["Классический бургер", "Латте"])
         cashier.post(f"{API}/orders/{o['id']}/send", json={}, timeout=30)
-        r = cashier.delete(f"{API}/orders/{o['id']}/items/0", timeout=30)
+        r = cashier.request("DELETE", f"{API}/orders/{o['id']}/items/0",
+                            json={"reason": "TEST_сторно"}, timeout=30)
         assert r.status_code == 200, r.text[:300]
         d = r.json()
         assert d["void_job"] is not None, "printed item removal must create a СТОРНО job"

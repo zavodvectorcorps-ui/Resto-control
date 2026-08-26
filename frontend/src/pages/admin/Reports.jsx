@@ -16,6 +16,10 @@ export default function Reports() {
     queryKey: ["sales", start, end],
     queryFn: async () => (await api.get(`/reports/sales?start=${start}&end=${end}`)).data,
   });
+  const { data: corrections = [] } = useQuery({
+    queryKey: ["corrections", start, end],
+    queryFn: async () => (await api.get(`/reports/corrections?start=${start}&end=${end}`)).data,
+  });
   const d = data || {};
   const payData = [
     { name: "Наличные", value: d.cash || 0, color: "#00E676" },
@@ -75,7 +79,7 @@ export default function Reports() {
         </div>
 
         <div className="bg-[#121212] border border-[#27272A] rounded-xl p-6">
-          <h3 className="font-head text-lg font-bold mb-4">По кассирам</h3>
+          <h3 className="font-head text-lg font-bold mb-4">По администраторам</h3>
           <div className="space-y-3 max-h-64 overflow-y-auto">
             {(d.by_cashier || []).map((c, i) => (
               <div key={i} className="flex justify-between text-sm">
@@ -85,6 +89,35 @@ export default function Reports() {
             ))}
             {(d.by_cashier || []).length === 0 && <p className="text-[#52525B] text-sm">Нет данных</p>}
           </div>
+        </div>
+      </div>
+
+      <div className="bg-[#121212] border border-[#27272A] rounded-xl p-6 mt-6">
+        <h3 className="font-head text-lg font-bold mb-4">Удаления позиций (контроль)</h3>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
+                <th className="text-left p-3">Дата</th>
+                <th className="text-left p-3">Позиция</th>
+                <th className="text-left p-3">Причина</th>
+                <th className="text-left p-3">Подтвердил</th>
+                <th className="text-right p-3">Сумма</th>
+              </tr>
+            </thead>
+            <tbody>
+              {corrections.map((c) => (
+                <tr key={c.id} className="border-b border-[#1A1A1A]" data-testid={`correction-${c.id}`}>
+                  <td className="p-3 text-[#A1A1AA]">{(c.created_at || "").slice(0, 16).replace("T", " ")}</td>
+                  <td className="p-3 font-medium">{c.item_name}</td>
+                  <td className="p-3 text-[#A1A1AA]">{c.reason}</td>
+                  <td className="p-3 text-[#A1A1AA]">{c.staff_name}</td>
+                  <td className="p-3 text-right tabnum text-[#FF3B30]">{money(c.item_price)}</td>
+                </tr>
+              ))}
+              {corrections.length === 0 && <tr><td colSpan="5" className="p-6 text-center text-[#52525B]">Удалений за период нет</td></tr>}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>

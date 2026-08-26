@@ -1,0 +1,71 @@
+{
+  "summary": "Full backend + frontend E2E validation of Task 0 (role rename/split manager|admin|waiter) and Task 1 (protected deletion of already-sent order items). Backend: added /app/backend/tests/test_features_iter7.py (18 tests) and repaired 13 stale assertions in the existing suite that still expected the OLD admin/cashier roles, the old recipe unit and the pre-Task-1 void contract. Full suite now 95 passed / 3 xfailed (documented gaps). Frontend: all 9 requested UI scenarios verified via Playwright — 8 PASS, 1 FAIL (deleting a not-yet-sent item that was added to an ALREADY-SAVED order returns 404 and the item is not removed). Two backend input-validation gaps also found (arbitrary staff role accepted; PUT /staff can create a PIN-login manager).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/staff, PUT /api/staff/{sid}", "issue": "`role` is not validated against an enum. POST /staff with role='superuser' returns 200 and creates a ghost user with NO pin and NO email/password (both credential checks are keyed on role in ('waiter','admin') / =='manager'). Add Literal['manager','admin','waiter'] to StaffReq. (Reproduced: two such users were created by the old test suite and had to be deleted manually.)"},
+      {"endpoint": "PUT /api/staff/{sid}", "issue": "Privilege/auth weakening: a PIN-only waiter can be updated to role='manager' while keeping the PIN, with no email/password required. POST /api/auth/pin-login with that 4-digit PIN then returns role=manager and grants full back-office access (GET /staff and GET /reports/corrections both 200). PUT should enforce the same rule as POST (manager => email+password, and must not keep/accept a pin)."},
+      {"endpoint": "startup seed()", "issue": "Seeded staff NAMES were not migrated with the roles: the manager is still named 'Администратор' and the admin/cashier (PIN 2222) is still 'Кассир Мария'. UI therefore shows 'Кассир Мария — Администратор (касса)' and 'Администратор — Менеджер', which is confusing and contradicts the brief's 'Администратор Мария'. Also the Staff page subtitle still reads 'Официанты/кассиры входят по PIN'."},
+      {"endpoint": "GET /api/reports/sales (Отчёты)", "issue": "Cosmetic: breakdown card is still labelled 'По кассирам' after the rename; consider 'По администраторам' or 'По сотрудникам'."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "POS — delete a not-yet-sent (pending) item from an order that already exists on the server",
+        "issue": "HIGH. Items added to the cart are only persisted by saveOrder() (send/pay/bill/move/split). requestVoid() for a pending item calls voidItem(index) -> DELETE /orders/{id}/items/{index} using the LOCAL cart index. For an already-saved order the new item does not exist server-side, so the request returns 404 and the user gets the error toast 'Позиция не найдена' and the item STAYS in the cart. Reproduced deterministically as both waiter (1111) and admin (2222): open table -> add item -> Отправить на кухню -> add a second (pending) item -> click its trash icon => HTTP 404 DELETE /api/orders/<id>/items/1. This directly breaks the Task-1 requirement 'deleting a not-yet-sent item stays instant'. It works only when the order has never been saved (store.orderId === null). Because the index is local, a count mismatch could also delete the WRONG server item. Suggested fix in Pos.jsx voidItem(): for a pending line, do store.removeItem(index) locally and then persist with PUT /orders/{id} (or DELETE the order when the cart becomes empty) instead of the index-based DELETE.",
+        "affected_selectors": ["void-1", "cart-item-1"]
+      }
+    ],
+    "design_issues": [
+      {"screen": "Admin → Сотрудники → Новый сотрудник", "issues": ["The Роль <select> has no data-testid (had to be located via generic 'select'); suggest staff-role-select", "Native browser <select> is used instead of the shadcn Select used elsewhere — visually inconsistent with the dark UI"]},
+      {"screen": "Admin → Сотрудники / Отчёты", "issues": ["Stale role wording after the rename: page subtitle 'Официанты/кассиры входят по PIN', sales card 'По кассирам', seeded names 'Кассир Мария' / 'Администратор'"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_features_iter7.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "FIX (HIGH): Pos.jsx voidItem/requestVoid — deleting a pending item on an already-saved order sends a stale local index to DELETE /orders/{id}/items/{idx} => 404 'Позиция не найдена', item not removed. Remove locally + PUT /orders/{id} with the new items array instead.",
+    "FIX: validate StaffReq.role with Literal['manager','admin','waiter'] in POST and PUT /api/staff (arbitrary roles currently accepted).",
+    "FIX: PUT /api/staff must enforce the same credential rule as POST — role=manager requires email+password and must not retain a PIN (currently a 4-digit PIN can log into the back-office as manager).",
+    "POLISH: migrate seeded staff names with the roles ('Кассир Мария' -> 'Администратор Мария', 'Администратор' -> 'Менеджер') and update the 'кассиры'/'По кассирам' copy on Staff & Reports.",
+    "POLISH: add data-testid=\"staff-role-select\" to the role dropdown in Staff.jsx."
+  ],
+  "critical_code_review_comments": [
+    "Index-based item API (DELETE /orders/{oid}/items/{idx}) is inherently unsafe with an optimistic local cart and with two waiters on the same bill — an item-level uuid would remove the whole class of 404/wrong-item bugs.",
+    "Pos.jsx confirmVoid() requires a PIN whenever user.role !== 'admin'; backend accepts 'admin' OR 'manager' as self-confirmers. Harmless today (managers cannot reach /pos) but the two checks should use the same predicate.",
+    "requestVoid() opens the protected modal only for print_status === 'printed', while the backend treats any status != 'pending' as sent. Today only those two values exist, so they agree — but if a 'queued'/'failed' status is ever added the UI would silently send a reason-less DELETE and get a 400.",
+    "Role migration in seed() is guarded by settings key role_migration_v1; if the settings collection is ever reset while users survive, update_many({'role':'admin'}->'manager') would wrongly promote every cashier-admin to manager. Consider keying the flag off the users collection or making it idempotent.",
+    "seed() never repairs the role of the existing ADMIN_EMAIL user — if that document's role is changed, the manager is locked out of the back-office with no recovery path.",
+    "Pos.jsx is 587 lines with 10+ modals inline; splitting the void/checkout/split/move modals into components would help maintainability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_features_iter7.py (new)",
+    "/app/backend/tests/test_auth.py (role expectations admin->manager, cashier->admin; bcrypt probe now queries role='manager')",
+    "/app/backend/tests/test_features_iter3.py (cashier->admin; void now sends a reason)",
+    "/app/backend/tests/test_catalog.py (duplicate-PIN test now uses role='admin')",
+    "/app/backend/tests/test_printing.py (void printed item now sends a reason)",
+    "/app/backend/tests/test_features_iter2.py (recipe beef amount accepts 150 g == 0.15 kg)"
+  ],
+  "success_rate": {"backend": "100% (95 passed, 3 xfailed documented gaps, 0 failed)", "frontend": "89% (8/9 requested scenarios PASS)"},
+  "seed_data_creation": "Backend tests create/delete TEST_ staff (TEST_Mgr2 test_mgr2@resto.com, TEST_Cashier PIN 9911, TEST_Esc PIN 9733) and TEST_ orders — all removed. UI test orders on Стол 1/4/5 were all paid; verified 8/8 tables free. Shift was closed to test the waiter 'обратитесь к кассиру' screen and REOPENED afterwards (currently OPEN, opened by Кассир Мария). Deleted 2 leftover role='cashier' ghost users (TEST_Dup) created by the stale test. NOTE: db.order_corrections now holds ~17 rows with TEST_ reasons (visible in the manager 'Удаления позиций' report) — harmless demo data, delete if you want a clean report.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "manager admin@resto.com / admin123; admin(cashier) PIN 2222; waiter PIN 1111 — all verified working",
+  "detailed_results": {
+    "1_login_and_landing": "PASS — login tabs read 'Официант / Администратор' and 'Менеджер'. admin@resto.com/admin123 -> /admin (role=manager). PIN 2222 -> /pos (role=admin). PIN 1111 -> /pos (role=waiter).",
+    "2_routing_rbac": "PASS — manager navigating to /pos is redirected to /admin; POS admin (2222) navigating to /admin is redirected to /pos. No 'Открыть кассу' button / open-pos-btn anywhere in the admin nav (count=0).",
+    "3_pos_payment_role": "PASS — waiter (1111): checkout-btn count=0. admin (2222): checkout-btn present, cash payment succeeded ('Оплачено'). close-shift-btn works ('Смена закрыта. Выручка: 25.00 ₽'), open-shift-btn works ('Смена открыта'). Waiter with no shift sees 'Смена не открыта / Обратитесь к кассиру или администратору, чтобы открыть смену' and open-shift-btn count=0.",
+    "4_staff_role_dropdown": "PASS — options exactly ['Официант', 'Администратор (касса)', 'Менеджер (бэк-офис)']. role=manager shows staff-email-input + staff-pass-input and hides staff-pin-input; role=admin/waiter shows only staff-pin-input. Backend: manager without email/password -> 400; waiter without pin -> 400; created manager can log in via email; created role=admin can log in via PIN.",
+    "5_task1_waiter_protected_delete": "PASS — after 'Отправить на кухню' the line shows the 'отправлено' badge. void-0 opens the modal with BOTH void-reason-input and void-pin-input. Empty reason -> toast 'Укажите причину удаления', modal stays open. Reason without PIN -> 'Введите PIN администратора' (client-side), modal stays open. Reason + wrong PIN 0000 -> HTTP 403 + toast 'Требуется подтверждение администратора (PIN)', item NOT removed. Reason + PIN 2222 -> 200, toast 'СТОРНО отправлено на цех', item removed. Backend also rejects the waiter's own PIN 1111 as confirmer (403).",
+    "6_task1_admin_protected_delete": "PASS — for the admin POS user the modal shows ONLY void-reason-input (void-pin-input count=0). Empty reason still blocked; with a reason the item is removed and 'СТОРНО отправлено на цех' is printed/toasted.",
+    "7_task1_pending_delete": "PARTIAL FAIL — instant delete works only for an order that was never saved (fresh cart, orderId=null): no modal, item removed immediately. For an order that already exists server-side, deleting a newly added pending line returns HTTP 404 and the toast 'Позиция не найдена'; the item remains in the cart. See frontend_issues.integration_issues.",
+    "8_corrections_report": "PASS — manager → Отчёты shows the 'Удаления позиций (контроль)' table with columns ДАТА / ПОЗИЦИЯ / ПРИЧИНА / ПОДТВЕРДИЛ / СУММА, 17 rows, correction-{id} testids. Both UI deletions appear with the exact reasons ('TEST_гость отказался (waiter)', 'TEST_админ сторно (UI)'), the item name and staff_name of the confirming admin. No mongo _id leaked.",
+    "9_auth_playbook": "PASS with notes — manager password hash starts with $2b$ (verified against Mongo); email brute-force lockout returns 429 after 5 failures within the window; PIN lockout works for a repeated same PIN (PIN-space enumeration is still unthrottled — pre-existing xfail from iteration 3); seed_admin re-hashes the password of an existing admin when ADMIN_PASSWORD changes. Items (2) httpOnly cookies and (3) CORS allow_credentials do NOT apply: this app authenticates with a Bearer JWT kept in localStorage and sets allow_credentials=False with allow_origins from CORS_ORIGINS — consistent, no cookie surface."
+  },
+  "context_for_next_testing_agent": "Backend suite is green: `cd /app/backend && python -m pytest tests/ -q`. 3 xfails are documented gaps (PIN enumeration rate limit, arbitrary staff role, PIN-manager escalation via PUT /staff) — flip them to real assertions once fixed. test_features_iter7.py covers Task 0/1; note orders must include name+price per item and the kitchen endpoint is POST /orders/{id}/send (not /send-to-kitchen); protected DELETE needs a body, use session.request('DELETE', url, json={...}). Flaky: test_auth::test_pin_login_invalid can return 429 instead of 401 if the PIN-lockout tests ran in the same 15-min window under xdist — re-run serially with -p no:randomly -o addopts=\"\". Env state left clean: shift OPEN, all 8 tables free, no open/sent orders. Only the pending-item 404 bug remains open on the frontend.",
+  "rca_of_the_issue": "Pending-item delete 404: POS keeps an optimistic local cart (useCart store) that is flushed to the server only by saveOrder() on send/pay/bill/move/split. requestVoid() branches on print_status and, for pending lines, calls voidItem(index) -> DELETE /orders/{orderId}/items/{index}. When the order already exists on the server but the pending line was added afterwards, the local index is out of range for the server's items array, so void_order_item() raises 404 'Позиция не найдена' and the cart is never updated. Fix: for a pending line remove it from the local store and persist with PUT /orders/{orderId} {items} (or DELETE /orders/{orderId} when the cart becomes empty), keeping the index-based DELETE strictly for lines that came from the server."
+}

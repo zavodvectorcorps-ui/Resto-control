@@ -99,7 +99,7 @@ class TestStaff:
         assert not any(s["id"] == sid for s in admin.get(f"{API}/staff", timeout=30).json())
 
     def test_duplicate_pin_rejected(self, admin):
-        r = admin.post(f"{API}/staff", json={"name": "TEST_Dup", "role": "cashier", "pin": "2222"}, timeout=30)
+        r = admin.post(f"{API}/staff", json={"name": "TEST_Dup", "role": "admin", "pin": "2222"}, timeout=30)
         assert r.status_code == 400
 
     def test_waiter_without_pin_rejected(self, admin):

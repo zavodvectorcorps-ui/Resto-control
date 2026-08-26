@@ -229,10 +229,17 @@ class TableReq(BaseModel):
 
 class StaffReq(BaseModel):
     name: str
-    role: str  # waiter | cashier | admin
+    role: str  # waiter | admin | manager
     pin: Optional[str] = None
     email: Optional[str] = None
     password: Optional[str] = None
+
+    @field_validator("role")
+    @classmethod
+    def _check_role(cls, v):
+        if v not in ("waiter", "admin", "manager"):
+            raise ValueError("role должен быть waiter, admin или manager")
+        return v
 
 
 class OrderItemReq(BaseModel):
@@ -334,6 +341,11 @@ class MoveReq(BaseModel):
     table_id: Optional[str] = None
 
 
+class VoidItemReq(BaseModel):
+    reason: Optional[str] = None
+    confirm_pin: Optional[str] = None
+
+
 class PrintTextReq(BaseModel):
     text: str
 
@@ -418,20 +430,20 @@ async def get_workshops(user: dict = Depends(get_current_user)):
 
 
 @api.post("/workshops")
-async def create_workshop(req: WorkshopReq, user: dict = Depends(require_roles("admin"))):
+async def create_workshop(req: WorkshopReq, user: dict = Depends(require_roles("manager"))):
     doc = {**req.model_dump(), "created_at": iso(now_utc())}
     res = await db.workshops.insert_one(doc)
     return serialize(await db.workshops.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/workshops/{wid}")
-async def update_workshop(wid: str, req: WorkshopReq, user: dict = Depends(require_roles("admin"))):
+async def update_workshop(wid: str, req: WorkshopReq, user: dict = Depends(require_roles("manager"))):
     await db.workshops.update_one({"_id": parse_oid(wid)}, {"$set": req.model_dump()})
     return serialize(await db.workshops.find_one({"_id": parse_oid(wid)}))
 
 
 @api.delete("/workshops/{wid}")
-async def delete_workshop(wid: str, user: dict = Depends(require_roles("admin"))):
+async def delete_workshop(wid: str, user: dict = Depends(require_roles("manager"))):
     await db.workshops.delete_one({"_id": parse_oid(wid)})
     return {"success": True}
 
@@ -443,20 +455,20 @@ async def get_categories(user: dict = Depends(get_current_user)):
 
 
 @api.post("/categories")
-async def create_category(req: CategoryReq, user: dict = Depends(require_roles("admin"))):
+async def create_category(req: CategoryReq, user: dict = Depends(require_roles("manager"))):
     doc = {**req.model_dump(), "created_at": iso(now_utc())}
     res = await db.categories.insert_one(doc)
     return serialize(await db.categories.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/categories/{cid}")
-async def update_category(cid: str, req: CategoryReq, user: dict = Depends(require_roles("admin"))):
+async def update_category(cid: str, req: CategoryReq, user: dict = Depends(require_roles("manager"))):
     await db.categories.update_one({"_id": parse_oid(cid)}, {"$set": req.model_dump()})
     return serialize(await db.categories.find_one({"_id": parse_oid(cid)}))
 
 
 @api.delete("/categories/{cid}")
-async def delete_category(cid: str, user: dict = Depends(require_roles("admin"))):
+async def delete_category(cid: str, user: dict = Depends(require_roles("manager"))):
     await db.categories.delete_one({"_id": parse_oid(cid)})
     return {"success": True}
 
@@ -468,20 +480,20 @@ async def get_products(user: dict = Depends(get_current_user)):
 
 
 @api.post("/products")
-async def create_product(req: ProductReq, user: dict = Depends(require_roles("admin"))):
+async def create_product(req: ProductReq, user: dict = Depends(require_roles("manager"))):
     doc = {**req.model_dump(), "created_at": iso(now_utc())}
     res = await db.products.insert_one(doc)
     return serialize(await db.products.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/products/{pid}")
-async def update_product(pid: str, req: ProductReq, user: dict = Depends(require_roles("admin"))):
+async def update_product(pid: str, req: ProductReq, user: dict = Depends(require_roles("manager"))):
     await db.products.update_one({"_id": parse_oid(pid)}, {"$set": req.model_dump()})
     return serialize(await db.products.find_one({"_id": parse_oid(pid)}))
 
 
 @api.delete("/products/{pid}")
-async def delete_product(pid: str, user: dict = Depends(require_roles("admin"))):
+async def delete_product(pid: str, user: dict = Depends(require_roles("manager"))):
     await db.products.delete_one({"_id": parse_oid(pid)})
     return {"success": True}
 
@@ -504,27 +516,27 @@ async def get_tables(user: dict = Depends(get_current_user)):
 
 
 @api.post("/tables")
-async def create_table(req: TableReq, user: dict = Depends(require_roles("admin"))):
+async def create_table(req: TableReq, user: dict = Depends(require_roles("manager"))):
     doc = {**req.model_dump(), "created_at": iso(now_utc())}
     res = await db.tables.insert_one(doc)
     return serialize(await db.tables.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/tables/{tid}")
-async def update_table(tid: str, req: TableReq, user: dict = Depends(require_roles("admin"))):
+async def update_table(tid: str, req: TableReq, user: dict = Depends(require_roles("manager"))):
     await db.tables.update_one({"_id": parse_oid(tid)}, {"$set": req.model_dump()})
     return serialize(await db.tables.find_one({"_id": parse_oid(tid)}))
 
 
 @api.delete("/tables/{tid}")
-async def delete_table(tid: str, user: dict = Depends(require_roles("admin"))):
+async def delete_table(tid: str, user: dict = Depends(require_roles("manager"))):
     await db.tables.delete_one({"_id": parse_oid(tid)})
     return {"success": True}
 
 
 # ----- Staff -----
 @api.get("/staff")
-async def get_staff(user: dict = Depends(require_roles("admin"))):
+async def get_staff(user: dict = Depends(require_roles("manager"))):
     users = await db.users.find({}).to_list(2000)
     out = []
     for u in users:
@@ -535,17 +547,17 @@ async def get_staff(user: dict = Depends(require_roles("admin"))):
 
 
 @api.post("/staff")
-async def create_staff(req: StaffReq, user: dict = Depends(require_roles("admin"))):
+async def create_staff(req: StaffReq, user: dict = Depends(require_roles("manager"))):
     doc = {"name": req.name, "role": req.role, "created_at": iso(now_utc())}
-    if req.role in ("waiter", "cashier"):
+    if req.role in ("waiter", "admin"):
         if not req.pin:
-            raise HTTPException(status_code=400, detail="PIN обязателен для официанта/кассира")
+            raise HTTPException(status_code=400, detail="PIN обязателен для официанта/администратора")
         if await db.users.find_one({"pin": req.pin}):
             raise HTTPException(status_code=400, detail="Такой PIN уже используется")
         doc["pin"] = req.pin
-    if req.role == "admin":
+    if req.role == "manager":
         if not req.email or not req.password:
-            raise HTTPException(status_code=400, detail="Email и пароль обязательны для админа")
+            raise HTTPException(status_code=400, detail="Email и пароль обязательны для менеджера")
         doc["email"] = req.email.strip().lower()
         doc["password_hash"] = hash_password(req.password)
     res = await db.users.insert_one(doc)
@@ -555,25 +567,42 @@ async def create_staff(req: StaffReq, user: dict = Depends(require_roles("admin"
 
 
 @api.put("/staff/{sid}")
-async def update_staff(sid: str, req: StaffReq, user: dict = Depends(require_roles("admin"))):
-    update = {"name": req.name, "role": req.role}
-    if req.pin:
-        existing = await db.users.find_one({"pin": req.pin, "_id": {"$ne": parse_oid(sid)}})
-        if existing:
-            raise HTTPException(status_code=400, detail="Такой PIN уже используется")
-        update["pin"] = req.pin
-    if req.email:
-        update["email"] = req.email.strip().lower()
-    if req.password:
-        update["password_hash"] = hash_password(req.password)
-    await db.users.update_one({"_id": parse_oid(sid)}, {"$set": update})
+async def update_staff(sid: str, req: StaffReq, user: dict = Depends(require_roles("manager"))):
+    target = await db.users.find_one({"_id": parse_oid(sid)})
+    if not target:
+        raise HTTPException(status_code=404, detail="Сотрудник не найден")
+    setd = {"name": req.name, "role": req.role}
+    unsetd = {}
+    if req.role == "manager":
+        email = req.email or target.get("email")
+        if not email or not (req.password or target.get("password_hash")):
+            raise HTTPException(status_code=400, detail="Email и пароль обязательны для менеджера")
+        setd["email"] = email.strip().lower()
+        if req.password:
+            setd["password_hash"] = hash_password(req.password)
+        unsetd["pin"] = ""
+    else:
+        pin = req.pin or target.get("pin")
+        if not pin:
+            raise HTTPException(status_code=400, detail="PIN обязателен для официанта/администратора")
+        if req.pin:
+            dup = await db.users.find_one({"pin": req.pin, "_id": {"$ne": parse_oid(sid)}})
+            if dup:
+                raise HTTPException(status_code=400, detail="Такой PIN уже используется")
+        setd["pin"] = pin
+        unsetd["email"] = ""
+        unsetd["password_hash"] = ""
+    ops = {"$set": setd}
+    if unsetd:
+        ops["$unset"] = unsetd
+    await db.users.update_one({"_id": parse_oid(sid)}, ops)
     u = serialize(await db.users.find_one({"_id": parse_oid(sid)}))
     u.pop("password_hash", None)
     return u
 
 
 @api.delete("/staff/{sid}")
-async def delete_staff(sid: str, user: dict = Depends(require_roles("admin"))):
+async def delete_staff(sid: str, user: dict = Depends(require_roles("manager"))):
     if sid == user["id"]:
         raise HTTPException(status_code=400, detail="Нельзя удалить самого себя")
     await db.users.delete_one({"_id": parse_oid(sid)})
@@ -590,7 +619,7 @@ async def current_shift(user: dict = Depends(get_current_user)):
 
 
 @api.post("/shifts/open")
-async def open_shift(user: dict = Depends(require_roles("cashier", "admin"))):
+async def open_shift(user: dict = Depends(require_roles("admin"))):
     existing = await db.shifts.find_one({"status": "open"})
     if existing:
         return serialize(existing)
@@ -632,7 +661,7 @@ async def close_shift(user: dict = Depends(get_current_user)):
 
 
 @api.get("/shifts")
-async def list_shifts(user: dict = Depends(require_roles("admin"))):
+async def list_shifts(user: dict = Depends(require_roles("manager"))):
     return await list_docs("shifts", sort=[("opened_at", -1)])
 
 
@@ -735,7 +764,7 @@ async def send_order(oid: str, user: dict = Depends(get_current_user)):
 
 
 @api.post("/orders/{oid}/pay")
-async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_roles("cashier", "admin"))):
+async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_roles("admin"))):
     o = await db.orders.find_one({"_id": parse_oid(oid)})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
@@ -799,20 +828,20 @@ async def get_inventory(user: dict = Depends(get_current_user)):
 
 
 @api.post("/inventory")
-async def create_inventory(req: InventoryItemReq, user: dict = Depends(require_roles("admin"))):
+async def create_inventory(req: InventoryItemReq, user: dict = Depends(require_roles("manager"))):
     doc = {**req.model_dump(), "created_at": iso(now_utc())}
     res = await db.inventory.insert_one(doc)
     return serialize(await db.inventory.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/inventory/{iid}")
-async def update_inventory(iid: str, req: InventoryItemReq, user: dict = Depends(require_roles("admin"))):
+async def update_inventory(iid: str, req: InventoryItemReq, user: dict = Depends(require_roles("manager"))):
     await db.inventory.update_one({"_id": parse_oid(iid)}, {"$set": req.model_dump()})
     return serialize(await db.inventory.find_one({"_id": parse_oid(iid)}))
 
 
 @api.delete("/inventory/{iid}")
-async def delete_inventory(iid: str, user: dict = Depends(require_roles("admin"))):
+async def delete_inventory(iid: str, user: dict = Depends(require_roles("manager"))):
     await db.inventory.delete_one({"_id": parse_oid(iid)})
     return {"success": True}
 
@@ -823,14 +852,14 @@ async def get_suppliers(user: dict = Depends(get_current_user)):
 
 
 @api.post("/suppliers")
-async def create_supplier(req: SupplierReq, user: dict = Depends(require_roles("admin"))):
+async def create_supplier(req: SupplierReq, user: dict = Depends(require_roles("manager"))):
     doc = {**req.model_dump(), "created_at": iso(now_utc())}
     res = await db.suppliers.insert_one(doc)
     return serialize(await db.suppliers.find_one({"_id": res.inserted_id}))
 
 
 @api.delete("/suppliers/{sid}")
-async def delete_supplier(sid: str, user: dict = Depends(require_roles("admin"))):
+async def delete_supplier(sid: str, user: dict = Depends(require_roles("manager"))):
     await db.suppliers.delete_one({"_id": parse_oid(sid)})
     return {"success": True}
 
@@ -841,7 +870,7 @@ async def get_invoices(user: dict = Depends(get_current_user)):
 
 
 @api.post("/invoices")
-async def create_invoice(req: InvoiceReq, user: dict = Depends(require_roles("admin"))):
+async def create_invoice(req: InvoiceReq, user: dict = Depends(require_roles("manager"))):
     if await db.invoices.find_one({"number": req.number}):
         raise HTTPException(status_code=400, detail="Накладная с таким номером уже существует")
     items = [i.model_dump() for i in req.items]
@@ -871,7 +900,7 @@ async def get_writeoffs(user: dict = Depends(get_current_user)):
 
 
 @api.post("/writeoffs")
-async def create_writeoff(req: WriteOffReq, user: dict = Depends(require_roles("admin"))):
+async def create_writeoff(req: WriteOffReq, user: dict = Depends(require_roles("manager"))):
     inv = await db.inventory.find_one({"_id": parse_oid(req.inventory_id)})
     if not inv:
         raise HTTPException(status_code=404, detail="Позиция склада не найдена")
@@ -898,7 +927,7 @@ async def create_writeoff(req: WriteOffReq, user: dict = Depends(require_roles("
 # REPORTS / DASHBOARD
 # ---------------------------------------------------------------------------
 @api.get("/reports/dashboard")
-async def dashboard(user: dict = Depends(require_roles("admin"))):
+async def dashboard(user: dict = Depends(require_roles("manager"))):
     today = now_utc().date().isoformat()
     closed = await db.orders.find({"status": "closed"}).to_list(10000)
     today_orders = [o for o in closed if (o.get("closed_at") or "")[:10] == today]
@@ -939,7 +968,7 @@ async def dashboard(user: dict = Depends(require_roles("admin"))):
 
 @api.get("/reports/sales")
 async def sales_report(start: Optional[str] = None, end: Optional[str] = None,
-                       user: dict = Depends(require_roles("admin"))):
+                       user: dict = Depends(require_roles("manager"))):
     closed = await db.orders.find({"status": "closed"}).to_list(10000)
     if start:
         closed = [o for o in closed if (o.get("closed_at") or "")[:10] >= start]
@@ -976,6 +1005,21 @@ async def sales_report(start: Optional[str] = None, end: Optional[str] = None,
         "total": total, "cash": cash, "card": card, "orders": len(closed),
         "by_product": by_product, "by_cashier": by_cashier,
     }
+
+
+@api.get("/reports/corrections")
+async def corrections_report(start: Optional[str] = None, end: Optional[str] = None,
+                             user: dict = Depends(require_roles("manager"))):
+    docs = await db.order_corrections.find({}).sort("created_at", -1).to_list(2000)
+    out = []
+    for d in docs:
+        day = (d.get("created_at") or "")[:10]
+        if start and day < start:
+            continue
+        if end and day > end:
+            continue
+        out.append(serialize(d))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1182,7 +1226,7 @@ async def get_settings(user: dict = Depends(get_current_user)):
 
 
 @api.put("/settings/receipt")
-async def set_receipt(req: ReceiptSettingsReq, user: dict = Depends(require_roles("admin"))):
+async def set_receipt(req: ReceiptSettingsReq, user: dict = Depends(require_roles("manager"))):
     update = {k: (v or "") for k, v in req.model_dump().items() if v is not None}
     await db.settings.update_one({"key": "venue"}, {"$set": {"key": "venue", **update}}, upsert=True)
     doc = await db.settings.find_one({"key": "venue"})
@@ -1191,7 +1235,7 @@ async def set_receipt(req: ReceiptSettingsReq, user: dict = Depends(require_role
 
 
 @api.put("/settings/logo")
-async def set_logo(req: LogoReq, user: dict = Depends(require_roles("admin"))):
+async def set_logo(req: LogoReq, user: dict = Depends(require_roles("manager"))):
     update = {}
     if req.image is not None:
         # валидируем, что это корректное изображение
@@ -1209,7 +1253,7 @@ async def set_logo(req: LogoReq, user: dict = Depends(require_roles("admin"))):
 
 
 @api.delete("/settings/logo")
-async def delete_logo(user: dict = Depends(require_roles("admin"))):
+async def delete_logo(user: dict = Depends(require_roles("manager"))):
     await db.settings.update_one({"key": "venue"}, {"$set": {"key": "venue", "logo_image": None, "logo_enabled": False}}, upsert=True)
     return {"success": True}
 
@@ -1221,26 +1265,26 @@ async def list_printers(user: dict = Depends(get_current_user)):
 
 
 @api.post("/printers")
-async def create_printer(req: PrinterReq, user: dict = Depends(require_roles("admin"))):
+async def create_printer(req: PrinterReq, user: dict = Depends(require_roles("manager"))):
     doc = {**req.model_dump(), "status": "unknown", "last_seen_at": None, "created_at": iso(now_utc())}
     res = await db.printers.insert_one(doc)
     return serialize(await db.printers.find_one({"_id": res.inserted_id}))
 
 
 @api.patch("/printers/{pid}")
-async def update_printer(pid: str, req: PrinterReq, user: dict = Depends(require_roles("admin"))):
+async def update_printer(pid: str, req: PrinterReq, user: dict = Depends(require_roles("manager"))):
     await db.printers.update_one({"_id": parse_oid(pid)}, {"$set": req.model_dump()})
     return serialize(await db.printers.find_one({"_id": parse_oid(pid)}))
 
 
 @api.delete("/printers/{pid}")
-async def delete_printer(pid: str, user: dict = Depends(require_roles("admin"))):
+async def delete_printer(pid: str, user: dict = Depends(require_roles("manager"))):
     await db.printers.delete_one({"_id": parse_oid(pid)})
     return {"success": True}
 
 
 @api.post("/printers/{pid}/test")
-async def printer_test(pid: str, user: dict = Depends(require_roles("admin"))):
+async def printer_test(pid: str, user: dict = Depends(require_roles("manager"))):
     printer = await db.printers.find_one({"_id": parse_oid(pid)})
     if not printer:
         raise HTTPException(status_code=404, detail="Принтер не найден")
@@ -1266,7 +1310,7 @@ async def printer_test(pid: str, user: dict = Depends(require_roles("admin"))):
 
 
 @api.post("/printers/{pid}/print-text")
-async def printer_print_text(pid: str, req: PrintTextReq, user: dict = Depends(require_roles("admin"))):
+async def printer_print_text(pid: str, req: PrintTextReq, user: dict = Depends(require_roles("manager"))):
     printer = await db.printers.find_one({"_id": parse_oid(pid)})
     if not printer:
         raise HTTPException(status_code=404, detail="Принтер не найден")
@@ -1278,7 +1322,7 @@ async def printer_print_text(pid: str, req: PrintTextReq, user: dict = Depends(r
 
 
 @api.post("/printers/{pid}/print-image")
-async def printer_print_image(pid: str, req: PrintImageReq, user: dict = Depends(require_roles("admin"))):
+async def printer_print_image(pid: str, req: PrintImageReq, user: dict = Depends(require_roles("manager"))):
     printer = await db.printers.find_one({"_id": parse_oid(pid)})
     if not printer:
         raise HTTPException(status_code=404, detail="Принтер не найден")
@@ -1297,12 +1341,12 @@ async def printer_print_image(pid: str, req: PrintImageReq, user: dict = Depends
 
 # ----- Print agents -----
 @api.get("/agents")
-async def list_agents(user: dict = Depends(require_roles("admin"))):
+async def list_agents(user: dict = Depends(require_roles("manager"))):
     return await list_docs("print_agents", sort=[("created_at", -1)])
 
 
 @api.post("/agents")
-async def create_agent(req: AgentReq, user: dict = Depends(require_roles("admin"))):
+async def create_agent(req: AgentReq, user: dict = Depends(require_roles("manager"))):
     doc = {"name": req.name, "api_key": secrets.token_hex(24),
            "last_heartbeat_at": None, "created_at": iso(now_utc())}
     res = await db.print_agents.insert_one(doc)
@@ -1310,20 +1354,20 @@ async def create_agent(req: AgentReq, user: dict = Depends(require_roles("admin"
 
 
 @api.delete("/agents/{aid}")
-async def delete_agent(aid: str, user: dict = Depends(require_roles("admin"))):
+async def delete_agent(aid: str, user: dict = Depends(require_roles("manager"))):
     await db.print_agents.delete_one({"_id": parse_oid(aid)})
     return {"success": True}
 
 
 # ----- Print jobs (admin view) -----
 @api.get("/print-jobs")
-async def list_print_jobs(user: dict = Depends(require_roles("admin"))):
+async def list_print_jobs(user: dict = Depends(require_roles("manager"))):
     docs = await db.print_jobs.find({}).sort("created_at", -1).to_list(200)
     return [serialize(d) for d in docs]
 
 
 @api.post("/print-jobs/{jid}/retry")
-async def retry_print_job(jid: str, user: dict = Depends(require_roles("admin"))):
+async def retry_print_job(jid: str, user: dict = Depends(require_roles("manager"))):
     job = await db.print_jobs.find_one({"_id": parse_oid(jid)})
     if not job:
         raise HTTPException(status_code=404, detail="Задание не найдено")
@@ -1350,7 +1394,7 @@ async def request_bill(oid: str, user: dict = Depends(get_current_user)):
 
 
 @api.delete("/orders/{oid}/items/{idx}")
-async def void_order_item(oid: str, idx: int, user: dict = Depends(get_current_user)):
+async def void_order_item(oid: str, idx: int, req: VoidItemReq = VoidItemReq(), user: dict = Depends(get_current_user)):
     o = await db.orders.find_one({"_id": parse_oid(oid)})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
@@ -1359,14 +1403,37 @@ async def void_order_item(oid: str, idx: int, user: dict = Depends(get_current_u
     items = o["items"]
     if idx < 0 or idx >= len(items):
         raise HTTPException(status_code=404, detail="Позиция не найдена")
-    removed = items.pop(idx)
+    removed = items[idx]
+    is_sent = removed.get("print_status", "pending") != "pending"
+    # Задача 1: защищённое удаление уже отправленной позиции — причина + подтверждение админа
+    if is_sent:
+        reason = (req.reason or "").strip()
+        if not reason:
+            raise HTTPException(status_code=400, detail="Укажите причину удаления")
+        if user["role"] in ("admin", "manager"):
+            confirmer = user
+        else:
+            pin = (req.confirm_pin or "").strip()
+            cu = await db.users.find_one({"pin": pin}) if pin else None
+            if not cu or cu.get("role") not in ("admin", "manager"):
+                raise HTTPException(status_code=403, detail="Требуется подтверждение администратора (PIN)")
+            confirmer = serialize(cu)
+        await db.order_corrections.insert_one({
+            "order_id": str(o["_id"]),
+            "item_name": removed.get("name", ""),
+            "item_price": removed.get("price", 0),
+            "staff_id": confirmer["id"],
+            "staff_name": confirmer.get("name", ""),
+            "reason": reason,
+            "created_at": iso(now_utc()),
+        })
+    items.pop(idx)
     void_job = None
     if removed.get("print_status") == "printed" and removed.get("workshop_id"):
         printer = await db.printers.find_one({"workshop_id": removed.get("workshop_id"), "active": True})
         if printer:
             void_job = await make_job(o, printer, "void", [removed])
     if not items:
-        # последняя позиция сторнирована — заказ пуст, отменяем его целиком
         await db.orders.delete_one({"_id": o["_id"]})
         return {"success": True, "void_job": void_job, "order": None, "deleted": True}
     items, subtotal = calc_items(items)
@@ -1481,7 +1548,7 @@ async def agent_heartbeat(req: HeartbeatReq, agent: dict = Depends(get_agent)):
 
 
 @api.post("/agent/emulate")
-async def emulate_agent(user: dict = Depends(require_roles("admin"))):
+async def emulate_agent(user: dict = Depends(require_roles("manager"))):
     """Симуляция локального агента: печатает все ожидающие задания (для демо в облаке)."""
     jobs = await db.print_jobs.find({"status": {"$in": ["pending", "sent"]}}).sort("created_at", 1).to_list(100)
     processed = []
@@ -1514,14 +1581,29 @@ app.add_middleware(
 @app.on_event("startup")
 async def seed():
     await db.users.create_index("pin", sparse=True)
+
+    # --- Задача 0: одноразовая миграция ролей (old admin->manager, old cashier->admin) ---
+    if not await db.settings.find_one({"key": "role_migration_v1"}):
+        await db.users.update_many({"role": "admin"}, {"$set": {"role": "manager"}})
+        await db.users.update_many({"role": "cashier"}, {"$set": {"role": "admin"}})
+        await db.settings.update_one({"key": "role_migration_v1"},
+                                     {"$set": {"key": "role_migration_v1", "done_at": iso(now_utc())}}, upsert=True)
+
+    # Задача 0: привести имена демо-персонала в соответствие с новыми ролями (одноразово)
+    if not await db.settings.find_one({"key": "role_names_v1"}):
+        await db.users.update_one({"pin": "2222"}, {"$set": {"name": "Администратор Мария"}})
+        await db.users.update_many({"role": "manager", "name": "Администратор"}, {"$set": {"name": "Менеджер"}})
+        await db.settings.update_one({"key": "role_names_v1"},
+                                     {"$set": {"key": "role_names_v1", "done_at": iso(now_utc())}}, upsert=True)
+
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@resto.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
     existing = await db.users.find_one({"email": admin_email})
     if not existing:
         await db.users.insert_one({
-            "name": "Администратор", "email": admin_email,
+            "name": "Менеджер", "email": admin_email,
             "password_hash": hash_password(admin_password),
-            "role": "admin", "created_at": iso(now_utc()),
+            "role": "manager", "created_at": iso(now_utc()),
         })
     elif not verify_password(admin_password, existing.get("password_hash", "")):
         await db.users.update_one({"email": admin_email},
@@ -1532,7 +1614,7 @@ async def seed():
         await db.users.insert_one({"name": "Официант Иван", "role": "waiter",
                                    "pin": "1111", "created_at": iso(now_utc())})
     if not await db.users.find_one({"pin": "2222"}):
-        await db.users.insert_one({"name": "Кассир Мария", "role": "cashier",
+        await db.users.insert_one({"name": "Администратор Мария", "role": "admin",
                                    "pin": "2222", "created_at": iso(now_utc())})
 
     # demo data only if empty

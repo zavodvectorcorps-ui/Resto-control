@@ -32,6 +32,8 @@ export default function Pos() {
   const [splitSel, setSplitSel] = useState({});
   const [billPicker, setBillPicker] = useState(null);
   const [voidConfirm, setVoidConfirm] = useState(null);
+  const [voidReason, setVoidReason] = useState("");
+  const [voidPin, setVoidPin] = useState("");
 
   const { data: shift, refetch: refetchShift } = useQuery({ queryKey: ["shift"], queryFn: async () => (await api.get("/shifts/current")).data });
   const { data: tables = [], refetch: refetchTables } = useQuery({ queryKey: ["pos-tables"], queryFn: async () => (await api.get("/tables")).data });
@@ -136,24 +138,36 @@ export default function Pos() {
 
   const requestVoid = (index, it) => {
     if (it.print_status === "printed") {
+      setVoidReason(""); setVoidPin("");
       setVoidConfirm({ index, name: it.name, count: it.count });
-    } else if (store.orderId) {
-      voidItem(index);
-    } else {
-      store.removeItem(index);
+      return;
+    }
+    // неотправленная позиция — убираем локально и синхронизируем с сервером
+    const remaining = store.cart.filter((_, i) => i !== index);
+    store.removeItem(index);
+    if (store.orderId) {
+      if (remaining.length === 0) {
+        api.delete(`/orders/${store.orderId}`).then(() => backToTables()).catch(() => {});
+      } else {
+        api.put(`/orders/${store.orderId}`, { items: remaining }).then(() => refetchTables()).catch(() => {});
+      }
     }
   };
 
   const confirmVoid = async () => {
+    if (!voidReason.trim()) { toast.error("Укажите причину удаления"); return; }
+    if (user.role !== "admin" && !voidPin.trim()) { toast.error("Введите PIN администратора"); return; }
     const index = voidConfirm.index;
     setVoidConfirm(null);
-    await voidItem(index);
+    await voidItem(index, voidReason.trim(), voidPin.trim());
+    setVoidReason(""); setVoidPin("");
   };
 
-  const voidItem = async (index) => {
+  const voidItem = async (index, reason, pin) => {
     if (!store.orderId) { store.removeItem(index); return; }
     try {
-      const { data } = await api.delete(`/orders/${store.orderId}/items/${index}`);
+      const opts = (reason || pin) ? { data: { reason, confirm_pin: pin } } : {};
+      const { data } = await api.delete(`/orders/${store.orderId}/items/${index}`, opts);
       if (data.deleted || !data.order) {
         toast.success("Заказ отменён");
         backToTables();
@@ -184,7 +198,7 @@ export default function Pos() {
   const backToTables = () => { store.clear(); setView("tables"); refetchTables(); };
 
   const subtotal = store.subtotal();
-  const canPay = user.role === "cashier" || user.role === "admin";
+  const canPay = user.role === "admin";
 
   // ---- No shift open ----
   if (shift === null) {
@@ -414,9 +428,17 @@ export default function Pos() {
               <AlertTriangle size={24} />
             </div>
             <h3 className="font-head text-xl font-bold mb-2">Сторнировать позицию?</h3>
-            <p className="text-sm text-[#A1A1AA] mb-6">
-              «{voidConfirm.name}» ×{voidConfirm.count} уже отправлена на цех. Будет напечатан чек <span className="text-white font-semibold">СТОРНО</span> на кухню/бар.
+            <p className="text-sm text-[#A1A1AA] mb-4">
+              «{voidConfirm.name}» ×{voidConfirm.count} уже отправлена на цех. Будет напечатан чек <span className="text-white font-semibold">СТОРНО</span>. Действие записывается в отчёт.
             </p>
+            <input value={voidReason} onChange={(e) => setVoidReason(e.target.value)} data-testid="void-reason-input"
+              placeholder="Причина удаления (обязательно)"
+              className="w-full mb-3 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 text-sm outline-none focus:border-[#FF3B30]" />
+            {user.role !== "admin" && (
+              <input value={voidPin} onChange={(e) => setVoidPin(e.target.value)} data-testid="void-pin-input" type="password"
+                placeholder="PIN администратора"
+                className="w-full mb-4 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 text-sm outline-none focus:border-[#FF3B30]" />
+            )}
             <div className="flex gap-3">
               <button onClick={() => setVoidConfirm(null)} data-testid="void-cancel-btn"
                 className="flex-1 bg-[#1A1A1A] border border-[#27272A] hover:border-[#A1A1AA] text-white rounded-lg py-3 font-semibold active:scale-95 transition-transform">
@@ -559,7 +581,7 @@ function PosTopBar({ user, shift, onLogout, onCloseShift, floating }) {
       </div>
       <div className="flex items-center gap-4">
         <span className="text-sm text-[#A1A1AA]">{user.name}</span>
-        {shift && (user.role === "cashier" || user.role === "admin") && (
+        {shift && user.role === "admin" && (
           <button onClick={onCloseShift} data-testid="close-shift-btn" className="text-sm text-[#A1A1AA] hover:text-[#FF3B30] flex items-center gap-1">
             <Power size={16} /> Закрыть смену
           </button>

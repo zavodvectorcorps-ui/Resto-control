@@ -124,7 +124,8 @@ class TestVoidLastItem:
         p = first_product(cashier)
         o = make_order(cashier, t["id"], [item(p)])
         cashier.post(f"{API}/orders/{o['id']}/send", timeout=60)
-        r = cashier.delete(f"{API}/orders/{o['id']}/items/0", timeout=60)
+        r = cashier.request("DELETE", f"{API}/orders/{o['id']}/items/0",
+                            json={"reason": "TEST_сторно"}, timeout=60)
         assert r.status_code == 200, r.text
         body = r.json()
         assert body.get("deleted") is True, body
@@ -205,7 +206,7 @@ class TestLockoutRegression:
             assert r.status_code in (401, 429), r.status_code
         r = requests.post(f"{API}/auth/pin-login", json={"pin": "2222"}, timeout=30)
         assert r.status_code == 200, f"valid PIN rejected: {r.status_code} {r.text[:200]}"
-        assert r.json()["user"]["role"] == "cashier"
+        assert r.json()["user"]["role"] == "admin"
         r = requests.post(f"{API}/auth/pin-login", json={"pin": "1111"}, timeout=30)
         assert r.status_code == 200, f"valid PIN rejected: {r.status_code} {r.text[:200]}"
         assert r.json()["user"]["role"] == "waiter"

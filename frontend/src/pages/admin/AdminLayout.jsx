@@ -49,13 +49,6 @@ export default function AdminLayout() {
           ))}
         </nav>
         <div className="p-3 border-t border-[#27272A] space-y-1">
-          <button
-            data-testid="open-pos-btn"
-            onClick={() => nav("/pos")}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-[#00E5FF] hover:bg-[#121212] transition-colors"
-          >
-            <Monitor size={18} /> Открыть кассу
-          </button>
           <div className="px-3 py-2 text-xs text-[#52525B]">{user?.name}</div>
           <button
             data-testid="logout-btn"

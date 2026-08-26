@@ -13,7 +13,7 @@ class TestAuth:
         d = r.json()
         assert isinstance(d.get("token"), str) and len(d["token"]) > 20
         assert d["user"]["email"] == test_credentials["email"]
-        assert d["user"]["role"] == "admin"
+        assert d["user"]["role"] == "manager"
         assert "password_hash" not in d["user"]
         assert "_id" not in d["user"] and "id" in d["user"]
 
@@ -40,10 +40,10 @@ class TestAuth:
         assert d["user"]["name"]
         assert d["token"]
 
-    def test_pin_login_cashier(self):
+    def test_pin_login_admin_cashier(self):
         r = requests.post(f"{API}/auth/pin-login", json={"pin": "2222"}, timeout=30)
         assert r.status_code == 200, r.text
-        assert r.json()["user"]["role"] == "cashier"
+        assert r.json()["user"]["role"] == "admin"
 
     def test_pin_login_invalid(self):
         r = requests.post(f"{API}/auth/pin-login", json={"pin": "9873"}, timeout=30)
@@ -76,7 +76,7 @@ class TestSecurityHardening:
             "async def m():\n"
             "    c=AsyncIOMotorClient(os.environ['MONGO_URL'])\n"
             "    d=c[os.environ['DB_NAME']]\n"
-            "    u=await d.users.find_one({'role':'admin'})\n"
+            "    u=await d.users.find_one({'role':'manager'})\n"
             "    print(u['password_hash'])\n"
             "asyncio.run(m())\n"
         )

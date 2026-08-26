@@ -39,7 +39,8 @@ class TestRecipeAutoWriteoff:
         assert burger.get("recipe"), "Классический бургер must have a тех.карта"
         names = {i["name"]: i["amount"] for i in burger["recipe"]}
         assert names.get("Булочки") == 1
-        assert names.get("Говядина") == 0.15
+        # iteration-6: recipe unit switched to grams -> 150 g == 0.15 kg
+        assert names.get("Говядина") in (0.15, 150), names
 
     def test_pay_order_deducts_recipe_ingredients_and_logs_writeoff(self, admin, cashier, shift, catalog):
         before = _inv(admin)
