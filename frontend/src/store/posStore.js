@@ -14,7 +14,7 @@ export const usePosStore = create((set, get) => ({
 
   addItem: (product) => {
     const cart = [...get().cart];
-    const idx = cart.findIndex((c) => c.product_id === product.id);
+    const idx = cart.findIndex((c) => c.product_id === product.id && c.print_status !== "printed");
     if (idx >= 0) {
       cart[idx] = { ...cart[idx], count: cart[idx].count + 1 };
     } else {
@@ -24,21 +24,19 @@ export const usePosStore = create((set, get) => ({
         price: product.price,
         count: 1,
         workshop_id: product.workshop_id || null,
+        print_status: "pending",
       });
     }
     set({ cart });
   },
 
-  changeCount: (product_id, delta) => {
-    let cart = get().cart.map((c) =>
-      c.product_id === product_id ? { ...c, count: c.count + delta } : c
-    );
+  changeCount: (index, delta) => {
+    let cart = get().cart.map((c, i) => (i === index ? { ...c, count: c.count + delta } : c));
     cart = cart.filter((c) => c.count > 0);
     set({ cart });
   },
 
-  removeItem: (product_id) =>
-    set({ cart: get().cart.filter((c) => c.product_id !== product_id) }),
+  removeItem: (index) => set({ cart: get().cart.filter((_, i) => i !== index) }),
 
   clear: () => set({ cart: [], orderId: null, tableId: null, tableName: "" }),
 

@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import {
   ChefHat, LogOut, Plus, Minus, Trash2, Send, CreditCard, Grid3x3,
   ArrowLeft, Power, Printer, Banknote, X, Utensils,
+  Receipt, ArrowRightLeft, Scissors, Check,
 } from "lucide-react";
 
 const money = (n) => `${Number(n || 0).toFixed(2)} ₽`;
@@ -25,6 +26,11 @@ export default function Pos() {
   const [pay, setPay] = useState("cash");
   const [tickets, setTickets] = useState(null);
   const [receipt, setReceipt] = useState(null);
+  const [precheck, setPrecheck] = useState(null);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [splitSel, setSplitSel] = useState({});
+  const [billPicker, setBillPicker] = useState(null);
 
   const { data: shift, refetch: refetchShift } = useQuery({ queryKey: ["shift"], queryFn: async () => (await api.get("/shifts/current")).data });
   const { data: tables = [], refetch: refetchTables } = useQuery({ queryKey: ["pos-tables"], queryFn: async () => (await api.get("/tables")).data });
@@ -47,11 +53,19 @@ export default function Pos() {
   };
 
   const selectTable = async (t) => {
-    if (t.open_order) {
-      store.loadCart(t.open_order.items, t.open_order.id, t.id, t.name);
+    const orders = t.open_orders && t.open_orders.length ? t.open_orders : (t.open_order ? [t.open_order] : []);
+    if (orders.length > 1) { setBillPicker({ table: t, orders }); return; }
+    if (orders.length === 1) {
+      store.loadCart(orders[0].items, orders[0].id, t.id, t.name);
     } else {
       store.loadCart([], null, t.id, t.name);
     }
+    setView("order");
+  };
+
+  const openBill = (order, t) => {
+    store.loadCart(order.items, order.id, t.id, t.name);
+    setBillPicker(null);
     setView("order");
   };
 
@@ -75,8 +89,63 @@ export default function Pos() {
     if (!id) return;
     const { data } = await api.post(`/orders/${id}/send`);
     setTickets(data.tickets);
+    const { data: order } = await api.get(`/orders/${id}`);
+    store.loadCart(order.items, id, store.tableId, store.tableName);
     refetchTables();
     toast.success("Заказ отправлен на кухню");
+  };
+
+  const requestBill = async () => {
+    const id = store.orderId || (await saveOrder());
+    if (!id) return;
+    try {
+      const { data } = await api.post(`/orders/${id}/request-bill`);
+      setPrecheck(data.job);
+      toast.success("Пречек отправлен на печать");
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const doMove = async (tid) => {
+    const id = store.orderId || (await saveOrder());
+    if (!id) return;
+    try {
+      await api.post(`/orders/${id}/move`, { table_id: tid });
+      const t = tables.find((x) => x.id === tid);
+      store.setTable(tid, t?.name || "");
+      setMoveOpen(false);
+      refetchTables();
+      toast.success(`Перенесено на ${t?.name}`);
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const doSplit = async () => {
+    const id = store.orderId || (await saveOrder());
+    if (!id) return;
+    const indices = Object.entries(splitSel).filter(([, v]) => v).map(([idx]) => Number(idx));
+    if (!indices.length) { toast.error("Выберите позиции для отдельного счёта"); return; }
+    try {
+      const { data } = await api.post(`/orders/${id}/split`, { indices });
+      store.loadCart(data.original.items, data.original.id, store.tableId, store.tableName);
+      setSplitOpen(false);
+      setSplitSel({});
+      refetchTables();
+      toast.success(`Отдельный счёт создан: ${money(data.split.total)}`);
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const voidItem = async (index) => {
+    if (!store.orderId) { store.removeItem(index); return; }
+    try {
+      const { data } = await api.delete(`/orders/${store.orderId}/items/${index}`);
+      if (data.deleted || !data.order) {
+        toast.success("Заказ отменён");
+        backToTables();
+        return;
+      }
+      store.loadCart(data.order.items, store.orderId, store.tableId, store.tableName);
+      refetchTables();
+      if (data.void_job) toast.success("СТОРНО отправлено на цех");
+    } catch (e) { toast.error(apiErr(e)); }
   };
 
   const doPay = async () => {
@@ -110,11 +179,17 @@ export default function Pos() {
             <Power size={30} />
           </div>
           <h1 className="font-head text-3xl font-extrabold mb-2">Смена не открыта</h1>
-          <p className="text-[#A1A1AA] mb-8">Откройте смену, чтобы принимать заказы</p>
-          <button onClick={openShift} data-testid="open-shift-btn"
-            className="bg-[#FF5A00] hover:bg-[#E04F00] text-white rounded-lg px-8 py-4 font-semibold text-lg active:scale-95 transition-transform">
-            Открыть смену
-          </button>
+          {user.role === "waiter" ? (
+            <p className="text-[#A1A1AA] mb-8">Обратитесь к кассиру или администратору, чтобы открыть смену</p>
+          ) : (
+            <>
+              <p className="text-[#A1A1AA] mb-8">Откройте смену, чтобы принимать заказы</p>
+              <button onClick={openShift} data-testid="open-shift-btn"
+                className="bg-[#FF5A00] hover:bg-[#E04F00] text-white rounded-lg px-8 py-4 font-semibold text-lg active:scale-95 transition-transform">
+                Открыть смену
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
@@ -135,8 +210,10 @@ export default function Pos() {
                 }`}>
                 <Grid3x3 size={22} className="text-[#A1A1AA] mb-3" />
                 <div className="font-head font-bold text-lg">{t.name}</div>
-                {t.open_order ? (
-                  <div className="text-sm text-[#FF5A00] font-semibold mt-1 tabnum">{money(t.open_order.total)}</div>
+                {t.open_orders && t.open_orders.length ? (
+                  <div className="text-sm text-[#FF5A00] font-semibold mt-1 tabnum">
+                    {money(t.open_total)}{t.open_orders.length > 1 ? ` · ${t.open_orders.length} счёта` : ""}
+                  </div>
                 ) : (
                   <div className="text-sm text-[#52525B] mt-1">Свободен</div>
                 )}
@@ -186,29 +263,53 @@ export default function Pos() {
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-2">
               {store.cart.length === 0 && <p className="text-[#52525B] text-sm text-center mt-8">Добавьте позиции из меню</p>}
-              {store.cart.map((it) => (
-                <div key={it.product_id} className="bg-[#1A1A1A] border border-[#27272A] rounded-lg p-3" data-testid={`cart-item-${it.product_id}`}>
-                  <div className="flex justify-between items-start mb-2">
-                    <span className="text-sm font-medium">{it.name}</span>
-                    <button onClick={() => store.removeItem(it.product_id)} className="text-[#52525B] hover:text-[#FF3B30]"><Trash2 size={14} /></button>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => store.changeCount(it.product_id, -1)} data-testid={`dec-${it.product_id}`}
-                        className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Minus size={14} /></button>
-                      <span className="w-6 text-center tabnum">{it.count}</span>
-                      <button onClick={() => store.changeCount(it.product_id, 1)} data-testid={`inc-${it.product_id}`}
-                        className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Plus size={14} /></button>
+              {store.cart.map((it, index) => {
+                const printed = it.print_status === "printed";
+                return (
+                  <div key={index} className="bg-[#1A1A1A] border border-[#27272A] rounded-lg p-3" data-testid={`cart-item-${index}`}>
+                    <div className="flex justify-between items-start mb-2">
+                      <span className="text-sm font-medium flex items-center gap-2">
+                        {it.name}
+                        {printed && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#00E5FF11] text-[#00E5FF] font-semibold">отправлено</span>}
+                      </span>
+                      <button onClick={() => voidItem(index)} className="text-[#71717A] hover:text-[#FF3B30]" data-testid={`void-${index}`} title={printed ? "Сторно" : "Удалить"}><Trash2 size={14} /></button>
                     </div>
-                    <span className="tabnum font-semibold text-[#FF5A00]">{money(it.price * it.count)}</span>
+                    <div className="flex justify-between items-center">
+                      {printed ? (
+                        <span className="text-sm text-[#A1A1AA] tabnum">× {it.count}</span>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => store.changeCount(index, -1)} data-testid={`dec-${index}`}
+                            className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Minus size={14} /></button>
+                          <span className="w-6 text-center tabnum">{it.count}</span>
+                          <button onClick={() => store.changeCount(index, 1)} data-testid={`inc-${index}`}
+                            className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Plus size={14} /></button>
+                        </div>
+                      )}
+                      <span className="tabnum font-semibold text-[#FF5A00]">{money(it.price * it.count)}</span>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
             <div className="border-t border-[#27272A] p-4 space-y-3">
               <div className="flex justify-between text-lg font-head font-bold">
                 <span>Итого</span>
                 <span className="tabnum text-[#FF5A00]" data-testid="cart-total">{money(subtotal)}</span>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <button onClick={requestBill} disabled={store.cart.length === 0} data-testid="request-bill-btn"
+                  className="bg-[#1A1A1A] border border-[#27272A] hover:border-[#FACC15] text-[#FACC15] rounded-lg py-2.5 text-xs font-semibold active:scale-95 transition-transform disabled:opacity-40 flex flex-col items-center gap-1">
+                  <Receipt size={16} /> Счёт
+                </button>
+                <button onClick={() => setMoveOpen(true)} disabled={!store.orderId && store.cart.length === 0} data-testid="move-btn"
+                  className="bg-[#1A1A1A] border border-[#27272A] hover:border-[#A855F7] text-[#A855F7] rounded-lg py-2.5 text-xs font-semibold active:scale-95 transition-transform disabled:opacity-40 flex flex-col items-center gap-1">
+                  <ArrowRightLeft size={16} /> Перенос
+                </button>
+                <button onClick={() => { setSplitSel({}); setSplitOpen(true); }} disabled={store.cart.length < 2} data-testid="split-btn"
+                  className="bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E676] text-[#00E676] rounded-lg py-2.5 text-xs font-semibold active:scale-95 transition-transform disabled:opacity-40 flex flex-col items-center gap-1">
+                  <Scissors size={16} /> Разделить
+                </button>
               </div>
               <button onClick={sendKitchen} disabled={store.cart.length === 0} data-testid="send-kitchen-btn"
                 className="w-full bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E5FF] text-[#00E5FF] rounded-lg py-3 font-semibold active:scale-95 transition-transform disabled:opacity-40 flex items-center justify-center gap-2">
@@ -284,6 +385,96 @@ export default function Pos() {
                 <Printer size={18} /> Печать
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bill picker (несколько счетов на столе) */}
+      {billPicker && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={() => setBillPicker(null)}>
+          <div className="w-full max-w-md bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-head text-xl font-bold">{billPicker.table.name}: выберите счёт</h3>
+              <button onClick={() => setBillPicker(null)}><X size={20} className="text-[#A1A1AA]" /></button>
+            </div>
+            <div className="space-y-2">
+              {billPicker.orders.map((o, i) => (
+                <button key={o.id} onClick={() => openBill(o, billPicker.table)} data-testid={`bill-${i}`}
+                  className="w-full flex items-center justify-between bg-[#1A1A1A] border border-[#27272A] hover:border-[#FF5A00] rounded-lg p-4 active:scale-95 transition-transform">
+                  <span className="text-sm">Счёт {i + 1} · {o.items.length} поз.{o.note ? ` · ${o.note}` : ""}</span>
+                  <span className="tabnum font-semibold text-[#FF5A00]">{money(o.total)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Move table modal */}
+      {moveOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={() => setMoveOpen(false)}>
+          <div className="w-full max-w-lg bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-head text-xl font-bold">Перенести на стол</h3>
+              <button onClick={() => setMoveOpen(false)}><X size={20} className="text-[#A1A1AA]" /></button>
+            </div>
+            <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+              {tables.filter((t) => t.id !== store.tableId).map((t) => (
+                <button key={t.id} onClick={() => doMove(t.id)} data-testid={`move-to-${t.id}`}
+                  className={`rounded-lg p-4 border active:scale-95 transition-transform ${t.open_order ? "border-[#FF5A00] bg-[#1A1206]" : "border-[#27272A] bg-[#1A1A1A] hover:border-[#A855F7]"}`}>
+                  <div className="font-head font-bold">{t.name}</div>
+                  <div className="text-xs text-[#52525B]">{t.open_order ? "занят" : "свободен"}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Split bill modal */}
+      {splitOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={() => setSplitOpen(false)}>
+          <div className="w-full max-w-md bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up max-h-[85vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-2">
+              <h3 className="font-head text-xl font-bold">Разделить счёт</h3>
+              <button onClick={() => setSplitOpen(false)}><X size={20} className="text-[#A1A1AA]" /></button>
+            </div>
+            <p className="text-sm text-[#A1A1AA] mb-4">Отметьте позиции для отдельного счёта</p>
+            <div className="space-y-2 mb-4">
+              {store.cart.map((it, index) => {
+                const sel = !!splitSel[index];
+                return (
+                  <button key={index} onClick={() => setSplitSel((s) => ({ ...s, [index]: !s[index] }))} data-testid={`split-item-${index}`}
+                    className={`w-full flex items-center justify-between rounded-lg p-3 border ${sel ? "border-[#00E676] bg-[#00E67611]" : "border-[#27272A] bg-[#1A1A1A]"}`}>
+                    <span className="flex items-center gap-2 text-sm">
+                      <span className={`w-5 h-5 rounded flex items-center justify-center border ${sel ? "bg-[#00E676] border-[#00E676]" : "border-[#52525B]"}`}>
+                        {sel && <Check size={13} className="text-black" />}
+                      </span>
+                      {it.name} ×{it.count}
+                    </span>
+                    <span className="tabnum text-[#FF5A00] font-semibold">{money(it.price * it.count)}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <button onClick={doSplit} data-testid="confirm-split-btn"
+              className="w-full bg-[#00E676] hover:bg-[#00c765] text-black rounded-lg py-3 font-semibold active:scale-95 transition-transform">
+              Создать отдельный счёт
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Precheck modal */}
+      {precheck && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={() => setPrecheck(null)}>
+          <div className="w-full max-w-sm bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-head text-xl font-bold mb-4 flex items-center gap-2"><Receipt size={20} /> Пречек</h3>
+            <div className="bg-white text-black rounded-lg p-4 font-mono text-xs whitespace-pre-wrap">{precheck.text}</div>
+            <button onClick={() => setPrecheck(null)} data-testid="precheck-close-btn"
+              className="w-full mt-4 bg-[#FF5A00] hover:bg-[#E04F00] text-white rounded-lg py-3 font-semibold active:scale-95 transition-transform">
+              Готово
+            </button>
           </div>
         </div>
       )}

@@ -1,0 +1,12 @@
+{
+  "name": "restocontrol-print-agent",
+  "version": "1.0.0",
+  "description": "Локальный агент печати RestoControl (мост между облаком и чековыми принтерами)",
+  "main": "agent.js",
+  "scripts": {
+    "start": "node agent.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

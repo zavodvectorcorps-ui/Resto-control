@@ -7,6 +7,7 @@ import Menu from "@/pages/admin/Menu";
 import Workshops from "@/pages/admin/Workshops";
 import Tables from "@/pages/admin/Tables";
 import Inventory from "@/pages/admin/Inventory";
+import Printers from "@/pages/admin/Printers";
 import Staff from "@/pages/admin/Staff";
 import Reports from "@/pages/admin/Reports";
 import Pos from "@/pages/pos/Pos";
@@ -55,6 +56,7 @@ export default function App() {
           <Route path="workshops" element={<Workshops />} />
           <Route path="tables" element={<Tables />} />
           <Route path="inventory" element={<Inventory />} />
+          <Route path="printers" element={<Printers />} />
           <Route path="staff" element={<Staff />} />
           <Route path="reports" element={<Reports />} />
         </Route>

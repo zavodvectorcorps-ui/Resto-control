@@ -8,12 +8,14 @@ load_dotenv(ROOT_DIR / '.env')
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
+from pydantic import BaseModel, Field, BeforeValidator, ConfigDict, field_validator
 from typing import List, Optional, Annotated, Any
 from datetime import datetime, timezone, timedelta, date
 from bson import ObjectId
 import logging
 import time
+import base64
+import secrets
 import bcrypt
 import jwt
 from collections import defaultdict
@@ -102,6 +104,24 @@ def record_fail(key: str):
     _login_attempts[key].append(time.time())
 
 
+# глобальный троттлинг подбора PIN (per-PIN бакет не ловит перебор разных PIN)
+_pin_global = []
+PIN_GLOBAL_WINDOW = 300
+PIN_GLOBAL_MAX = 40
+
+
+def pin_global_guard():
+    now = time.time()
+    global _pin_global
+    _pin_global = [t for t in _pin_global if now - t < PIN_GLOBAL_WINDOW]
+    if len(_pin_global) >= PIN_GLOBAL_MAX:
+        raise HTTPException(status_code=429, detail="Слишком много неверных попыток. Попробуйте позже.")
+
+
+def record_pin_global():
+    _pin_global.append(time.time())
+
+
 def clear_fails(key: str):
     _login_attempts.pop(key, None)
 
@@ -180,6 +200,12 @@ class CategoryReq(BaseModel):
     position: int = 0
 
 
+class RecipeIngredient(BaseModel):
+    inventory_id: str
+    name: str
+    amount: float
+
+
 class ProductReq(BaseModel):
     name: str
     category_id: Optional[str] = None
@@ -189,6 +215,7 @@ class ProductReq(BaseModel):
     measure: str = "pcs"
     image: Optional[str] = None
     for_sale: bool = True
+    recipe: List[RecipeIngredient] = []
 
 
 class TableReq(BaseModel):
@@ -211,6 +238,8 @@ class OrderItemReq(BaseModel):
     price: float
     count: float = 1
     workshop_id: Optional[str] = None
+    print_status: str = "pending"
+    print_job_id: Optional[str] = None
 
 
 class OrderCreateReq(BaseModel):
@@ -259,40 +288,88 @@ class WriteOffReq(BaseModel):
     reason: str = "Списание"
 
 
+class PrinterReq(BaseModel):
+    name: str
+    station: str  # kitchen | bar | precheck
+    workshop_id: Optional[str] = None
+    local_ip: str = "192.168.0.100"
+    port: int = 9100
+    codepage_label: str = "cp866"          # iconv/python codec name, e.g. cp866
+    escape_t_value: int = 17               # ESC t <n> — задаётся вручную под каждый принтер
+    paper_width_mm: int = 80
+    active: bool = True
+
+    @field_validator("codepage_label")
+    @classmethod
+    def _check_codepage(cls, v):
+        if v not in ("cp866", "cp1251"):
+            raise ValueError("codepage_label должен быть cp866 или cp1251")
+        return v
+
+    @field_validator("escape_t_value")
+    @classmethod
+    def _check_esct(cls, v):
+        if not (0 <= v <= 255):
+            raise ValueError("escape_t_value должен быть 0..255")
+        return v
+
+
+class AgentReq(BaseModel):
+    name: str
+
+
+class JobReport(BaseModel):
+    status: str  # printed | failed
+    error_message: Optional[str] = None
+
+
+class HeartbeatReq(BaseModel):
+    printers: Optional[dict] = None  # {printer_id: "online"|"offline"}
+
+
+class MoveReq(BaseModel):
+    table_id: Optional[str] = None
+
+
+class SplitReq(BaseModel):
+    indices: List[int]
+
+
 # ---------------------------------------------------------------------------
 # AUTH ROUTES
 # ---------------------------------------------------------------------------
 @api.post("/auth/login")
 async def login(req: LoginReq, request: Request):
-    ip = request.client.host if request.client else "?"
     email = req.email.strip().lower()
-    key = f"login:{ip}:{email}"
-    check_lock(key)
+    key = f"login:{email}"
     user = await db.users.find_one({"email": email})
-    if not user or not verify_password(req.password, user.get("password_hash", "")):
-        record_fail(key)
-        raise HTTPException(status_code=401, detail="Неверный email или пароль")
-    clear_fails(key)
-    token = create_token(str(user["_id"]), user["role"])
-    u = serialize(user)
-    u.pop("password_hash", None)
-    return {"token": token, "user": u}
+    if user and verify_password(req.password, user.get("password_hash", "")):
+        clear_fails(key)  # валидный вход никогда не блокируется
+        token = create_token(str(user["_id"]), user["role"])
+        u = serialize(user)
+        u.pop("password_hash", None)
+        return {"token": token, "user": u}
+    record_fail(key)
+    check_lock(key)
+    raise HTTPException(status_code=401, detail="Неверный email или пароль")
 
 
 @api.post("/auth/pin-login")
 async def pin_login(req: PinLoginReq, request: Request):
-    ip = request.client.host if request.client else "?"
-    key = f"pin:{ip}"
+    pin = req.pin.strip()
+    key = f"pin:{pin}"
+    user = await db.users.find_one({"pin": pin})
+    if user:
+        clear_fails(key)
+        token = create_token(str(user["_id"]), user["role"])
+        u = serialize(user)
+        u.pop("password_hash", None)
+        return {"token": token, "user": u}
+    record_fail(key)
+    record_pin_global()
     check_lock(key)
-    user = await db.users.find_one({"pin": req.pin.strip()})
-    if not user:
-        record_fail(key)
-        raise HTTPException(status_code=401, detail="Неверный PIN-код")
-    clear_fails(key)
-    token = create_token(str(user["_id"]), user["role"])
-    u = serialize(user)
-    u.pop("password_hash", None)
-    return {"token": token, "user": u}
+    pin_global_guard()
+    raise HTTPException(status_code=401, detail="Неверный PIN-код")
 
 
 @api.get("/auth/me")
@@ -390,14 +467,16 @@ async def delete_product(pid: str, user: dict = Depends(require_roles("admin")))
 @api.get("/tables")
 async def get_tables(user: dict = Depends(get_current_user)):
     tables = await list_docs("tables", sort=[("name", 1)])
-    # attach open order info
     open_orders = await db.orders.find({"status": {"$in": ["open", "sent"]}}).to_list(2000)
     by_table = {}
     for o in open_orders:
         if o.get("table_id"):
-            by_table[o["table_id"]] = serialize(o)
+            by_table.setdefault(o["table_id"], []).append(serialize(o))
     for t in tables:
-        t["open_order"] = by_table.get(t["id"])
+        orders = by_table.get(t["id"], [])
+        t["open_orders"] = orders
+        t["open_order"] = orders[0] if orders else None
+        t["open_total"] = round(sum(o.get("total", 0) for o in orders), 2)
     return tables
 
 
@@ -488,7 +567,7 @@ async def current_shift(user: dict = Depends(get_current_user)):
 
 
 @api.post("/shifts/open")
-async def open_shift(user: dict = Depends(get_current_user)):
+async def open_shift(user: dict = Depends(require_roles("cashier", "admin"))):
     existing = await db.shifts.find_one({"status": "open"})
     if existing:
         return serialize(existing)
@@ -507,6 +586,9 @@ async def close_shift(user: dict = Depends(get_current_user)):
     shift = await db.shifts.find_one({"status": "open"})
     if not shift:
         raise HTTPException(status_code=400, detail="Нет открытой смены")
+    open_count = await db.orders.count_documents({"status": {"$in": ["open", "sent"]}, "shift_id": str(shift["_id"])})
+    if open_count > 0:
+        raise HTTPException(status_code=400, detail=f"Есть незакрытые заказы ({open_count}). Оплатите или отмените их перед закрытием смены.")
     orders = await db.orders.find({"shift_id": str(shift["_id"]), "status": "closed"}).to_list(5000)
     total = sum(o.get("total", 0) for o in orders)
     cash = sum(o.get("total", 0) for o in orders if o.get("payment_method") == "cash")
@@ -602,17 +684,31 @@ async def send_order(oid: str, user: dict = Depends(get_current_user)):
     o = await db.orders.find_one({"_id": parse_oid(oid)})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
-    await db.orders.update_one(
-        {"_id": parse_oid(oid)}, {"$set": {"status": "sent", "sent_at": iso(now_utc())}}
-    )
-    # build kitchen tickets grouped by workshop
+    items = o["items"]
+    pending_idx = [i for i, it in enumerate(items) if it.get("print_status", "pending") != "printed"]
     workshops = {w["id"]: w for w in await list_docs("workshops")}
+    groups = {}
+    for i in pending_idx:
+        groups.setdefault(items[i].get("workshop_id") or "none", []).append(i)
     tickets = {}
-    for it in o["items"]:
-        wid = it.get("workshop_id") or "none"
+    jobs = []
+    for wid, idxs in groups.items():
+        grp_items = [items[i] for i in idxs]
         wname = workshops.get(wid, {}).get("name", "Без цеха")
-        tickets.setdefault(wname, []).append({"name": it["name"], "count": it["count"]})
-    return {"success": True, "tickets": tickets}
+        tickets[wname] = [{"name": items[i]["name"], "count": items[i]["count"]} for i in idxs]
+        printer = await db.printers.find_one({"workshop_id": wid, "active": True}) if wid != "none" else None
+        if printer:
+            job = await make_job(o, printer, "ticket", grp_items)
+            jobs.append(job)
+            for i in idxs:
+                items[i]["print_job_id"] = job["id"]
+        for i in idxs:
+            items[i]["print_status"] = "printed"
+    await db.orders.update_one(
+        {"_id": parse_oid(oid)},
+        {"$set": {"items": items, "status": "sent", "sent_at": iso(now_utc())}},
+    )
+    return {"success": True, "tickets": tickets, "jobs": jobs}
 
 
 @api.post("/orders/{oid}/pay")
@@ -635,12 +731,34 @@ async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_role
             "closed_at": iso(now_utc()),
         }},
     )
+    # auto write-off ingredients by recipe (тех.карты)
+    for it in o["items"]:
+        pid = it.get("product_id", "")
+        if not ObjectId.is_valid(pid):
+            continue
+        prod = await db.products.find_one({"_id": ObjectId(pid)})
+        if not prod:
+            continue
+        for ing in prod.get("recipe", []):
+            amt = round(ing["amount"] * it["count"], 4)
+            if amt <= 0 or not ObjectId.is_valid(ing["inventory_id"]):
+                continue
+            await db.inventory.update_one(
+                {"_id": ObjectId(ing["inventory_id"])}, {"$inc": {"balance": -amt}}
+            )
+            await db.writeoffs.insert_one({
+                "inventory_id": ing["inventory_id"], "name": ing["name"], "amount": amt,
+                "reason": f"Продажа: {it['name']}", "created_by": user.get("name", ""),
+                "created_at": iso(now_utc()),
+            })
     return serialize(await db.orders.find_one({"_id": parse_oid(oid)}))
 
 
 @api.delete("/orders/{oid}")
 async def delete_order(oid: str, user: dict = Depends(get_current_user)):
-    await db.orders.delete_one({"_id": parse_oid(oid), "status": {"$ne": "closed"}})
+    res = await db.orders.delete_one({"_id": parse_oid(oid), "status": {"$ne": "closed"}})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Заказ не найден или уже закрыт")
     return {"success": True}
 
 
@@ -833,12 +951,333 @@ async def sales_report(start: Optional[str] = None, end: Optional[str] = None,
 
 
 # ---------------------------------------------------------------------------
+# PRINTING — ESC/POS rendering, printers, print jobs, agent bridge API
+# ---------------------------------------------------------------------------
+def escpos_encode(text: str, codepage_label: str) -> bytes:
+    try:
+        return text.encode(codepage_label, errors="replace")
+    except LookupError:
+        return text.encode("cp866", errors="replace")
+
+
+def render_escpos(lines: List[str], codepage_label: str = "cp866", escape_t_value: int = 17) -> bytes:
+    """Собирает ESC/POS буфер. Кодовая страница задаётся ТОЛЬКО полем принтера
+    escape_t_value (ESC t <n>) — это эмпирическое число под конкретную модель, а не
+    производное от названия кодировки. Кириллица кодируется в codepage_label (cp866)."""
+    ESC = b"\x1b"
+    GS = b"\x1d"
+    buf = bytearray()
+    buf += ESC + b"@"                                # init/reset
+    buf += ESC + b"t" + bytes([escape_t_value & 0xFF])  # select code page (per-printer)
+    if lines:
+        # заголовок: по центру, жирный, двойная высота (кросс-принтерные команды)
+        buf += ESC + b"a" + b"\x01"
+        buf += ESC + b"E" + b"\x01"
+        buf += GS + b"!" + b"\x01"
+        buf += escpos_encode(lines[0] + "\n", codepage_label)
+        buf += GS + b"!" + b"\x00"
+        buf += ESC + b"E" + b"\x00"
+        buf += ESC + b"a" + b"\x00"
+        for ln in lines[1:]:
+            buf += escpos_encode(ln + "\n", codepage_label)
+    buf += b"\n\n\n" + GS + b"V" + b"\x00"           # feed + full cut
+    return bytes(buf)
+
+
+def _pad(left: str, right: str, w: int = 32) -> str:
+    space = max(1, w - len(left) - len(right))
+    return left + " " * space + right
+
+
+def _fmt_count(c) -> str:
+    return str(int(c)) if float(c) == int(c) else str(c)
+
+
+def build_lines(kind: str, table_name: str, waiter: str, items: List[dict], subtotal=None) -> List[str]:
+    title = {"ticket": "*** ЗАКАЗ ***", "void": "*** СТОРНО ***", "precheck": "--- ПРЕДЧЕК ---"}[kind]
+    lines = [title, f"Стол: {table_name}", f"Официант: {waiter}",
+             now_utc().strftime("%d.%m.%Y %H:%M"), "-" * 32]
+    for it in items:
+        if kind == "precheck":
+            total = it.get("total", it["price"] * it["count"])
+            lines.append(_pad(f"{it['name']} x{_fmt_count(it['count'])}", f"{total:.2f}"))
+        else:
+            lines.append(f"{it['name']} x{_fmt_count(it['count'])}")
+    if kind == "precheck" and subtotal is not None:
+        lines.append("-" * 32)
+        lines.append(_pad("ИТОГО:", f"{subtotal:.2f}"))
+    return lines
+
+
+async def _table_name(tid) -> str:
+    if not tid or not ObjectId.is_valid(tid):
+        return "—"
+    t = await db.tables.find_one({"_id": ObjectId(tid)})
+    return t["name"] if t else "—"
+
+
+async def make_job(order: dict, printer: dict, jtype: str, items: List[dict], subtotal=None) -> dict:
+    table_name = await _table_name(order.get("table_id"))
+    lines = build_lines(jtype, table_name, order.get("waiter_name", ""), items, subtotal)
+    codepage_label = printer.get("codepage_label", "cp866")
+    escape_t_value = printer.get("escape_t_value", 17)
+    payload = base64.b64encode(render_escpos(lines, codepage_label, escape_t_value)).decode()
+    doc = {
+        "order_id": str(order["_id"]),
+        "printer_id": str(printer["_id"]),
+        "printer_name": printer["name"],
+        "printer_ip": printer.get("local_ip"),
+        "printer_port": printer.get("port", 9100),
+        "station": printer["station"],
+        "type": jtype,
+        "payload": payload,
+        "text": "\n".join(lines),
+        "status": "pending",
+        "attempts": 0,
+        "error_message": None,
+        "created_at": iso(now_utc()),
+        "sent_at": None,
+        "printed_at": None,
+    }
+    res = await db.print_jobs.insert_one(doc)
+    return serialize(await db.print_jobs.find_one({"_id": res.inserted_id}))
+
+
+# ----- Printers CRUD -----
+@api.get("/printers")
+async def list_printers(user: dict = Depends(get_current_user)):
+    return await list_docs("printers", sort=[("name", 1)])
+
+
+@api.post("/printers")
+async def create_printer(req: PrinterReq, user: dict = Depends(require_roles("admin"))):
+    doc = {**req.model_dump(), "status": "unknown", "last_seen_at": None, "created_at": iso(now_utc())}
+    res = await db.printers.insert_one(doc)
+    return serialize(await db.printers.find_one({"_id": res.inserted_id}))
+
+
+@api.patch("/printers/{pid}")
+async def update_printer(pid: str, req: PrinterReq, user: dict = Depends(require_roles("admin"))):
+    await db.printers.update_one({"_id": parse_oid(pid)}, {"$set": req.model_dump()})
+    return serialize(await db.printers.find_one({"_id": parse_oid(pid)}))
+
+
+@api.delete("/printers/{pid}")
+async def delete_printer(pid: str, user: dict = Depends(require_roles("admin"))):
+    await db.printers.delete_one({"_id": parse_oid(pid)})
+    return {"success": True}
+
+
+# ----- Print agents -----
+@api.get("/agents")
+async def list_agents(user: dict = Depends(require_roles("admin"))):
+    return await list_docs("print_agents", sort=[("created_at", -1)])
+
+
+@api.post("/agents")
+async def create_agent(req: AgentReq, user: dict = Depends(require_roles("admin"))):
+    doc = {"name": req.name, "api_key": secrets.token_hex(24),
+           "last_heartbeat_at": None, "created_at": iso(now_utc())}
+    res = await db.print_agents.insert_one(doc)
+    return serialize(await db.print_agents.find_one({"_id": res.inserted_id}))
+
+
+@api.delete("/agents/{aid}")
+async def delete_agent(aid: str, user: dict = Depends(require_roles("admin"))):
+    await db.print_agents.delete_one({"_id": parse_oid(aid)})
+    return {"success": True}
+
+
+# ----- Print jobs (admin view) -----
+@api.get("/print-jobs")
+async def list_print_jobs(user: dict = Depends(require_roles("admin"))):
+    docs = await db.print_jobs.find({}).sort("created_at", -1).to_list(200)
+    return [serialize(d) for d in docs]
+
+
+@api.post("/print-jobs/{jid}/retry")
+async def retry_print_job(jid: str, user: dict = Depends(require_roles("admin"))):
+    job = await db.print_jobs.find_one({"_id": parse_oid(jid)})
+    if not job:
+        raise HTTPException(status_code=404, detail="Задание не найдено")
+    await db.print_jobs.update_one(
+        {"_id": parse_oid(jid)},
+        {"$set": {"status": "pending", "error_message": None, "sent_at": None, "printed_at": None}},
+    )
+    return serialize(await db.print_jobs.find_one({"_id": parse_oid(jid)}))
+
+
+# ----- Order printing actions -----
+@api.post("/orders/{oid}/request-bill")
+async def request_bill(oid: str, user: dict = Depends(get_current_user)):
+    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    if not o:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    if o["status"] == "closed":
+        raise HTTPException(status_code=400, detail="Заказ уже закрыт")
+    printer = await db.printers.find_one({"station": "precheck", "active": True})
+    if not printer:
+        raise HTTPException(status_code=400, detail="Не настроен принтер пречека (станция precheck)")
+    job = await make_job(o, printer, "precheck", o["items"], o.get("subtotal"))
+    return {"success": True, "job": job}
+
+
+@api.delete("/orders/{oid}/items/{idx}")
+async def void_order_item(oid: str, idx: int, user: dict = Depends(get_current_user)):
+    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    if not o:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    if o["status"] == "closed":
+        raise HTTPException(status_code=400, detail="Заказ уже закрыт")
+    items = o["items"]
+    if idx < 0 or idx >= len(items):
+        raise HTTPException(status_code=404, detail="Позиция не найдена")
+    removed = items.pop(idx)
+    void_job = None
+    if removed.get("print_status") == "printed" and removed.get("workshop_id"):
+        printer = await db.printers.find_one({"workshop_id": removed.get("workshop_id"), "active": True})
+        if printer:
+            void_job = await make_job(o, printer, "void", [removed])
+    if not items:
+        # последняя позиция сторнирована — заказ пуст, отменяем его целиком
+        await db.orders.delete_one({"_id": o["_id"]})
+        return {"success": True, "void_job": void_job, "order": None, "deleted": True}
+    items, subtotal = calc_items(items)
+    await db.orders.update_one(
+        {"_id": o["_id"]},
+        {"$set": {"items": items, "subtotal": subtotal, "total": round(subtotal - o.get("discount", 0), 2)}},
+    )
+    return {"success": True, "void_job": void_job, "deleted": False,
+            "order": serialize(await db.orders.find_one({"_id": o["_id"]}))}
+
+
+@api.post("/orders/{oid}/move")
+async def move_order(oid: str, req: MoveReq, user: dict = Depends(get_current_user)):
+    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    if not o:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    if o["status"] == "closed":
+        raise HTTPException(status_code=400, detail="Заказ уже закрыт")
+    await db.orders.update_one({"_id": o["_id"]}, {"$set": {"table_id": req.table_id}})
+    return serialize(await db.orders.find_one({"_id": o["_id"]}))
+
+
+@api.post("/orders/{oid}/split")
+async def split_order(oid: str, req: SplitReq, user: dict = Depends(get_current_user)):
+    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    if not o:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    if o["status"] == "closed":
+        raise HTTPException(status_code=400, detail="Заказ уже закрыт")
+    idxset = set(req.indices)
+    new_items, remaining = [], []
+    for i, it in enumerate(o["items"]):
+        (new_items if i in idxset else remaining).append(it)
+    if not new_items:
+        raise HTTPException(status_code=400, detail="Не выбраны позиции для разделения")
+    if not remaining:
+        raise HTTPException(status_code=400, detail="Нельзя перенести весь счёт — используйте оплату")
+    new_items, new_sub = calc_items(new_items)
+    remaining, rem_sub = calc_items(remaining)
+    await db.orders.update_one(
+        {"_id": o["_id"]},
+        {"$set": {"items": remaining, "subtotal": rem_sub, "total": round(rem_sub - o.get("discount", 0), 2)}},
+    )
+    new_doc = {
+        "table_id": o.get("table_id"),
+        "waiter_id": o.get("waiter_id"),
+        "waiter_name": o.get("waiter_name", ""),
+        "items": new_items,
+        "subtotal": new_sub,
+        "discount": 0.0,
+        "total": new_sub,
+        "status": "open",
+        "note": "Разделённый счёт",
+        "shift_id": o.get("shift_id"),
+        "created_at": iso(now_utc()),
+    }
+    res = await db.orders.insert_one(new_doc)
+    return {
+        "original": serialize(await db.orders.find_one({"_id": o["_id"]})),
+        "split": serialize(await db.orders.find_one({"_id": res.inserted_id})),
+    }
+
+
+# ----- Agent bridge API (auth via X-Agent-Key) -----
+async def get_agent(request: Request) -> dict:
+    key = request.headers.get("X-Agent-Key")
+    agent = await db.print_agents.find_one({"api_key": key}) if key else None
+    if not agent:
+        raise HTTPException(status_code=401, detail="Неверный ключ агента")
+    return agent
+
+
+@api.get("/agent/printers")
+async def agent_printers(agent: dict = Depends(get_agent)):
+    return await list_docs("printers")
+
+
+@api.get("/agent/print-jobs")
+async def agent_fetch_jobs(agent: dict = Depends(get_agent)):
+    jobs = await db.print_jobs.find({"status": "pending"}).sort("created_at", 1).to_list(50)
+    out = []
+    for j in jobs:
+        r = await db.print_jobs.update_one(
+            {"_id": j["_id"], "status": "pending"},
+            {"$set": {"status": "sent", "sent_at": iso(now_utc())}},
+        )
+        if r.modified_count:
+            out.append(serialize({**j, "status": "sent"}))
+    return out
+
+
+@api.patch("/agent/print-jobs/{jid}")
+async def agent_report_job(jid: str, req: JobReport, agent: dict = Depends(get_agent)):
+    upd = {"status": req.status}
+    if req.status == "printed":
+        upd["printed_at"] = iso(now_utc())
+    if req.status == "failed":
+        upd["error_message"] = req.error_message
+    await db.print_jobs.update_one({"_id": parse_oid(jid)}, {"$set": upd, "$inc": {"attempts": 1}})
+    return {"success": True}
+
+
+@api.post("/agent/heartbeat")
+async def agent_heartbeat(req: HeartbeatReq, agent: dict = Depends(get_agent)):
+    await db.print_agents.update_one({"_id": agent["_id"]}, {"$set": {"last_heartbeat_at": iso(now_utc())}})
+    for pid, status in (req.printers or {}).items():
+        if ObjectId.is_valid(pid):
+            await db.printers.update_one(
+                {"_id": ObjectId(pid)}, {"$set": {"status": status, "last_seen_at": iso(now_utc())}}
+            )
+    return {"success": True}
+
+
+@api.post("/agent/emulate")
+async def emulate_agent(user: dict = Depends(require_roles("admin"))):
+    """Симуляция локального агента: печатает все ожидающие задания (для демо в облаке)."""
+    jobs = await db.print_jobs.find({"status": {"$in": ["pending", "sent"]}}).sort("created_at", 1).to_list(100)
+    processed = []
+    for j in jobs:
+        await db.print_jobs.update_one(
+            {"_id": j["_id"]},
+            {"$set": {"status": "printed", "sent_at": j.get("sent_at") or iso(now_utc()),
+                      "printed_at": iso(now_utc())}, "$inc": {"attempts": 1}},
+        )
+        j2 = serialize(j)
+        j2["status"] = "printed"
+        processed.append(j2)
+    await db.printers.update_many({}, {"$set": {"status": "online", "last_seen_at": iso(now_utc())}})
+    return {"processed": len(processed), "jobs": processed}
+
+
+# ---------------------------------------------------------------------------
 # App wiring
 # ---------------------------------------------------------------------------
 app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
@@ -899,10 +1338,85 @@ async def seed():
             await db.tables.insert_one({"name": f"Стол {i}", "hall": "Основной зал",
                                         "seats": 4, "created_at": iso(now_utc())})
 
+        inv_ids = {}
         for name, m, bal, cost in [("Говядина", "kg", 20, 8.0), ("Булочки", "pcs", 100, 0.3),
                                     ("Сыр", "kg", 10, 6.0), ("Кофе зерно", "kg", 5, 15.0)]:
-            await db.inventory.insert_one({"name": name, "measure": m, "balance": bal,
-                                           "cost": cost, "created_at": iso(now_utc())})
+            r = await db.inventory.insert_one({"name": name, "measure": m, "balance": bal,
+                                               "cost": cost, "created_at": iso(now_utc())})
+            inv_ids[name] = str(r.inserted_id)
+
+        # demo recipes (тех.карты) — auto write-off on sale
+        recipe_map = {
+            "Классический бургер": [("Булочки", 1), ("Говядина", 0.15)],
+            "Чизбургер": [("Булочки", 1), ("Говядина", 0.15), ("Сыр", 0.03)],
+            "Двойной бургер": [("Булочки", 1), ("Говядина", 0.30), ("Сыр", 0.03)],
+            "Латте": [("Кофе зерно", 0.018)],
+        }
+        for pname, ings in recipe_map.items():
+            recipe = [{"inventory_id": inv_ids[n], "name": n, "amount": a} for n, a in ings]
+            await db.products.update_one({"name": pname}, {"$set": {"recipe": recipe}})
+
+        # demo printers (цех = станция печати) — реальное оборудование заведения
+        await db.printers.insert_one({"name": "Кухня", "station": "kitchen", "workshop_id": kitchen_id,
+                                      "local_ip": "192.168.0.112", "port": 9100, "codepage_label": "cp866",
+                                      "escape_t_value": 17, "paper_width_mm": 80, "active": True,
+                                      "status": "unknown", "last_seen_at": None, "created_at": iso(now_utc())})
+        await db.printers.insert_one({"name": "Бар", "station": "bar", "workshop_id": bar_id,
+                                      "local_ip": "192.168.0.111", "port": 9100, "codepage_label": "cp866",
+                                      "escape_t_value": 17, "paper_width_mm": 80, "active": True,
+                                      "status": "unknown", "last_seen_at": None, "created_at": iso(now_utc())})
+        await db.printers.insert_one({"name": "Касса (пречек)", "station": "precheck", "workshop_id": None,
+                                      "local_ip": "192.168.0.111", "port": 9100, "codepage_label": "cp866",
+                                      "escape_t_value": 17, "paper_width_mm": 80, "active": True,
+                                      "status": "unknown", "last_seen_at": None, "created_at": iso(now_utc())})
+
+    if await db.print_agents.count_documents({}) == 0:
+        await db.print_agents.insert_one({"name": "Мост — зал 1 этаж", "api_key": secrets.token_hex(24),
+                                          "last_heartbeat_at": None, "created_at": iso(now_utc())})
+
+    # idempotent: ensure printers + recipes exist even on a pre-existing DB
+    if await db.printers.count_documents({}) == 0:
+        ws = {w["name"]: w["id"] for w in await list_docs("workshops")}
+        if "Кухня" in ws:
+            await db.printers.insert_one({"name": "Кухня", "station": "kitchen", "workshop_id": ws["Кухня"],
+                                          "local_ip": "192.168.0.112", "port": 9100, "codepage_label": "cp866",
+                                          "escape_t_value": 17, "paper_width_mm": 80, "active": True,
+                                          "status": "unknown", "last_seen_at": None, "created_at": iso(now_utc())})
+        if "Бар" in ws:
+            await db.printers.insert_one({"name": "Бар", "station": "bar", "workshop_id": ws["Бар"],
+                                          "local_ip": "192.168.0.111", "port": 9100, "codepage_label": "cp866",
+                                          "escape_t_value": 17, "paper_width_mm": 80, "active": True,
+                                          "status": "unknown", "last_seen_at": None, "created_at": iso(now_utc())})
+        await db.printers.insert_one({"name": "Касса (пречек)", "station": "precheck", "workshop_id": None,
+                                      "local_ip": "192.168.0.111", "port": 9100, "codepage_label": "cp866",
+                                      "escape_t_value": 17, "paper_width_mm": 80, "active": True,
+                                      "status": "unknown", "last_seen_at": None, "created_at": iso(now_utc())})
+
+    # migrate legacy printer docs to escape_t_value model + real hardware IPs (из брифа)
+    ip_map = {"Кухня": "192.168.0.112", "Бар": "192.168.0.111", "Касса (пречек)": "192.168.0.111"}
+    async for p in db.printers.find({}):
+        upd = {}
+        if "escape_t_value" not in p:
+            upd["escape_t_value"] = 17
+        if "codepage_label" not in p:
+            upd["codepage_label"] = (p.get("codepage") or "cp866").lower()
+        if p.get("name") in ip_map and p.get("local_ip") != ip_map[p["name"]]:
+            upd["local_ip"] = ip_map[p["name"]]
+        if upd:
+            await db.printers.update_one({"_id": p["_id"]}, {"$set": upd})
+
+    if await db.products.count_documents({"recipe": {"$exists": True, "$ne": []}}) == 0:
+        inv = {i["name"]: i["id"] for i in await list_docs("inventory")}
+        recipe_map = {
+            "Классический бургер": [("Булочки", 1), ("Говядина", 0.15)],
+            "Чизбургер": [("Булочки", 1), ("Говядина", 0.15), ("Сыр", 0.03)],
+            "Двойной бургер": [("Булочки", 1), ("Говядина", 0.30), ("Сыр", 0.03)],
+            "Латте": [("Кофе зерно", 0.018)],
+        }
+        for pname, ings in recipe_map.items():
+            recipe = [{"inventory_id": inv[n], "name": n, "amount": a} for n, a in ings if n in inv]
+            if recipe:
+                await db.products.update_one({"name": pname}, {"$set": {"recipe": recipe}})
 
     logger.info("Seed complete")
 

@@ -1,0 +1,57 @@
+{
+  "summary": "Iteration-3 full-stack verification of the printer ESC t / codepage brief + all 4 iteration-2 regressions. Backend: added /app/backend/tests/test_features_iter3.py (13 tests) and migrated the 3 stale iteration-2 test modules to the new contracts (split by indices, printer codepage_label/escape_t_value, identity-based lockout). Full suite now 79 passed / 1 xfailed (documented PIN-enumeration gap) in ~75 s. Verified: seeded printers = cp866 + ESC t 17 on 192.168.0.112 (Кухня) / 192.168.0.111 (Бар, Касса); ESC/POS payload begins 1b40 1b7411 and ends 1d5600; per-printer create/PATCH persists escape_t_value=6/cp1251; void of last item returns {deleted:true, order:null} and the order is really gone (GET 404) while voiding a non-last item keeps the order and recalculates the total; split by indices moves exactly the selected line and GET /tables exposes open_orders[] + combined open_total; 8 wrong PINs then PIN 2222/1111 = 200 and 8 wrong admin passwords then valid login = 200 (no 429 for valid creds) while 8 fails on the same bad identity do 429; waiter POST /shifts/open = 403, cashier = 200; close_shift blocked (400) with an open order in the shift and 200 after cleanup. Frontend (Playwright, dark RU UI): Печать cards render 'cp866 · ESC t 17' + real IPs, edit modal has printer-esct-input (=17) and the codepage select; editing to ESC t 21 / cp1251 saves, survives reload and reverts; copy-agent-N no longer raises the CRA runtime-error overlay (overlay count 0); эмулятор marks jobs Напечатано and renders the receipt (emu-close-btn). POS: 6 wrong PINs then 1111 logs in; waiter with no shift sees 'Обратитесь к кассиру' and open-shift-btn is absent, cashier sees and uses it; CRITICAL void dead-end fixed end-to-end (1 item -> send -> 'отправлено' -> void-0 -> 'Заказ отменён' -> tables screen, table free, Закрыть смену succeeds); split by index creates a 2nd bill, the table card shows '17.00 ₽ · 2 счёта', re-selecting opens the bill picker (bill-0 12.50 / bill-1 4.50), each bill pays separately, the picker disappears when only one bill remains, the shift-close guard blocks while one bill is unpaid and succeeds after (Выручка 17.00 ₽); recipe auto write-off confirmed via API after the UI sale (Булочки 68->67, Говядина 15.2->15.05, Кофе зерно 4.892->4.874 with 'Продажа: Классический бургер'/'Продажа: Латте' entries). No blocking defects found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/pin-login", "issue": "SECURITY GAP: the lockout bucket is keyed on the submitted PIN, so an attacker enumerating the 4-digit space (0000..9999, one attempt per PIN) is never rate limited — 15 distinct wrong PINs returned 15x401, no 429 (test marked xfail in test_auth.py::test_pin_enumeration_rate_limited). Same-PIN repetition does lock out correctly. Add a second counter keyed on the client identity (X-Forwarded-For / device) or a global pin-login rate limit, while keeping the current 'valid creds are never blocked' behaviour."},
+      {"endpoint": "DELETE /api/orders/{oid}", "issue": "Still returns 200 {'success': true} for a valid-but-nonexistent ObjectId (deleted_count == 0); should be 404. Same pattern in the other delete endpoints (carried over from iteration 2)."},
+      {"endpoint": "POST /api/orders/{oid}/request-bill", "issue": "Still no status check — a пречек can be printed for an already paid/closed order (carried over from iteration 2)."},
+      {"endpoint": "DELETE /api/orders/{oid}/items/{idx}", "issue": "Void of a printed item without workshop_id still resolves the printer with {'workshop_id': None, active:true}, which is the precheck/касса printer, so a СТОРНО ticket can print on the cash printer (carried over from iteration 2)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "admin/Printers.jsx copyKey", "issue": "LOW: when navigator.clipboard.writeText() rejects (permission denied — reproduced in the test browser) the catch only shows 'Не удалось скопировать' and never falls back to the textarea/execCommand path that already exists in the else-branch. No crash and no overlay (the reported MEDIUM bug is fixed), but the copy silently never works in restricted clipboard contexts.", "selector": "[data-testid^=\"copy-agent-\"]", "priority": "LOW"},
+      {"component": "Pos.jsx void-N", "issue": "LOW: сторно of a printed line (which now cancels the whole order when it is the last item and prints a physical СТОРНО ticket) still has no confirmation dialog, and the trash icon contrast (#71717A on #1A1A1A) is below WCAG AA.", "selector": "[data-testid^=\"void-\"]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Печать → Настройка принтера", "issues": ["Станция / Цех / Кодировка / Ширина ленты are native <select> elements with the browser default dropdown instead of a shadcn Select — still inconsistent with the dark RU theme (same as Меню and the Отчёты date pickers)", "Modal does not close on Escape"]},
+      {"screen": "Печать → Очередь заданий", "issues": ["Queue is still unbounded/unfiltered (30+ rows), no status filter/pagination and no order/table column to identify a job"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_features_iter3.py",
+    "/app/backend/tests/test_features_iter2.py",
+    "/app/backend/tests/test_printing.py",
+    "/app/backend/tests/test_auth.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "MEDIUM (security): add a client/global rate limit to /auth/pin-login so PIN enumeration across different PINs is throttled (current bucket is per-PIN only) — keep 'valid credentials are never 429'.",
+    "LOW: Printers.jsx copyKey — on clipboard rejection fall back to the textarea/execCommand copy before showing the error toast.",
+    "LOW: return 404 from DELETE /api/orders/{id} (and siblings) when deleted_count == 0.",
+    "LOW: reject POST /orders/{id}/request-bill for closed orders; do not fall back to the precheck printer when voiding an item that has no workshop_id.",
+    "LOW (UX/design): confirmation dialog before сторно, brighter trash icon, shadcn Select instead of native <select> in the printer/product modals, status filter + order column in the print-jobs queue."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1391 lines — split into routers (auth, catalog, pos, printing, inventory, reports) and move render_escpos/build_lines/make_job into printing.py; the ESC/POS renderer is the piece most likely to need unit-level iteration for real hardware.",
+    "render_escpos uses text.encode(codepage_label, errors='replace'); an admin can save an arbitrary codepage_label from the select today (cp866/cp1251 only), but the backend accepts any string — validate against a whitelist of supported Python codecs to avoid a LookupError/500 at print time.",
+    "pay_order still writes inventory deltas and writeoffs item-by-item with no transaction and no balance floor — stock can go negative and a mid-loop failure leaves partial write-offs.",
+    "@app.on_event('startup'/'shutdown') is deprecated — migrate to the lifespan context manager.",
+    "seed() re-seeds demo recipes on every startup when no product has a recipe, silently resurrecting them after an admin clears the last one."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_features_iter3.py (new, 13 tests)",
+    "/app/backend/tests/test_features_iter2.py (split tests migrated to {indices: [...]})",
+    "/app/backend/tests/test_printing.py (printer CRUD migrated to codepage_label + escape_t_value)",
+    "/app/backend/tests/test_auth.py (PIN lockout split into same-PIN lockout (passes) + xfail enumeration gap)"
+  ],
+  "success_rate": {"backend": "100% (79 passed, 1 xfail documenting the PIN-enumeration gap)", "frontend": "100% of the 10 requested flows verified; only 2 LOW cosmetic/robustness findings"},
+  "seed_data_creation": "No permanent test data left: TEST_Принтер_ESCT deleted, all UI/API orders paid or deleted, shift closed, printers reverted to cp866/ESC t 17, tests/cleanup_test_data.py run (removed 4 stale TEST_ writeoffs). Real inventory consumed by the verified sales (Булочки 68->67, Говядина 15.2->15.05, Кофе зерно 4.892->4.874) and today's revenue includes 17.00 ₽ of test payments.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "admin@resto.com / admin123; PIN 2222 (Кассир Мария), PIN 1111 (Официант Иван) — all verified. Hammering wrong PINs/passwords is now safe: valid credentials are never 429'd.",
+  "context_for_next_testing_agent": "pytest: `cd /app/backend && python -m pytest tests/ -n 0 -p no:randomly -q` -> 79 passed, 1 xfailed (~75 s); run `python tests/cleanup_test_data.py` first and delete leftover open/sent orders before shift-close tests. test_features_iter3.py covers the iteration-3 contracts. Frontend gotchas: Playwright script strings must avoid backslashes inside f-string expressions (define selector constants instead); POS pin login = mode-staff-btn + pin-clear + pin-key-N + pin-submit; cart testids are index-based now (cart-item-N/inc-N/dec-N/void-N); bill picker = bill-0/bill-1 (only shown when a table has >1 open order); printers page = edit-printer-{id}, printer-esct-input, emulate-btn/emu-close-btn, copy-agent-{id}. Clipboard writes are blocked in the test browser, so copy shows the fallback error toast (expected, no overlay). All iteration-2 CRITICAL/HIGH/MEDIUM bugs are confirmed fixed; only the PIN-enumeration rate-limit gap and a few LOW items remain.",
+  "rca_of_the_issue": "PIN-enumeration gap: check_lock/record_fail use key=f'pin:{pin}', so every distinct wrong PIN gets its own 5-attempt bucket; the 10^4 PIN space can therefore be walked without ever crossing a threshold. This is the safe half of the iteration-2 fix (valid creds are never blocked, verified) but leaves brute-force protection ineffective for PIN login; add an identity/global counter alongside the per-PIN one."
+}

@@ -12,6 +12,7 @@ export default function Menu() {
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: async () => (await api.get("/products")).data });
   const { data: categories = [] } = useQuery({ queryKey: ["categories"], queryFn: async () => (await api.get("/categories")).data });
   const { data: workshops = [] } = useQuery({ queryKey: ["workshops"], queryFn: async () => (await api.get("/workshops")).data });
+  const { data: inventory = [] } = useQuery({ queryKey: ["inventory"], queryFn: async () => (await api.get("/inventory")).data });
 
   const [tab, setTab] = useState("products");
   const [open, setOpen] = useState(false);
@@ -23,9 +24,28 @@ export default function Menu() {
 
   const openProduct = (p) => {
     setEditing(p);
-    setForm(p ? { ...p } : { name: "", price: 0, cost: 0, measure: "pcs", category_id: categories[0]?.id, workshop_id: workshops[0]?.id, for_sale: true });
+    setForm(p ? { ...p, recipe: p.recipe || [] } : { name: "", price: 0, cost: 0, measure: "pcs", category_id: categories[0]?.id, workshop_id: workshops[0]?.id, for_sale: true, recipe: [] });
     setOpen(true);
   };
+
+  const addIngredient = () => {
+    const first = inventory[0];
+    if (!first) { toast.error("Сначала добавьте позиции на склад"); return; }
+    setForm((f) => ({ ...f, recipe: [...(f.recipe || []), { inventory_id: first.id, name: first.name, amount: 1 }] }));
+  };
+  const updateIngredient = (i, field, value) => {
+    setForm((f) => {
+      const recipe = [...(f.recipe || [])];
+      if (field === "inventory_id") {
+        const inv = inventory.find((x) => x.id === value);
+        recipe[i] = { ...recipe[i], inventory_id: value, name: inv?.name || "" };
+      } else {
+        recipe[i] = { ...recipe[i], amount: value };
+      }
+      return { ...f, recipe };
+    });
+  };
+  const removeIngredient = (i) => setForm((f) => ({ ...f, recipe: (f.recipe || []).filter((_, idx) => idx !== i) }));
 
   const saveProduct = async () => {
     try {
@@ -33,6 +53,7 @@ export default function Menu() {
         name: form.name, price: Number(form.price), cost: Number(form.cost),
         measure: form.measure, category_id: form.category_id, workshop_id: form.workshop_id,
         for_sale: form.for_sale ?? true, image: form.image || null,
+        recipe: (form.recipe || []).map((r) => ({ inventory_id: r.inventory_id, name: r.name, amount: Number(r.amount) })),
       };
       if (editing) await api.put(`/products/${editing.id}`, body);
       else await api.post("/products", body);
@@ -142,6 +163,26 @@ export default function Menu() {
             options={workshops.map((w) => ({ value: w.id, label: w.name }))} />
           <SelectField label="Ед. измерения" value={form.measure || "pcs"} onChange={(e) => setForm({ ...form, measure: e.target.value })}
             options={[{ value: "pcs", label: "шт" }, { value: "kg", label: "кг" }, { value: "l", label: "л" }]} />
+          <div className="border-t border-[#27272A] pt-4">
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA]">Тех.карта (авто-списание)</label>
+              <button onClick={addIngredient} className="text-[#00E676] text-sm flex items-center gap-1 hover:text-white" data-testid="add-ingredient-btn"><Plus size={14} /> Ингредиент</button>
+            </div>
+            <div className="space-y-2">
+              {(form.recipe || []).length === 0 && <p className="text-xs text-[#52525B]">Списание со склада не настроено</p>}
+              {(form.recipe || []).map((r, i) => (
+                <div key={i} className="flex gap-2 items-center" data-testid={`ingredient-row-${i}`}>
+                  <select value={r.inventory_id} onChange={(e) => updateIngredient(i, "inventory_id", e.target.value)}
+                    className="flex-1 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#FF5A00]">
+                    {inventory.map((inv) => <option key={inv.id} value={inv.id}>{inv.name} ({inv.measure})</option>)}
+                  </select>
+                  <input type="number" step="0.001" value={r.amount} onChange={(e) => updateIngredient(i, "amount", e.target.value)}
+                    className="w-20 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#FF5A00]" data-testid={`ingredient-amount-${i}`} />
+                  <button onClick={() => removeIngredient(i)} className="text-[#A1A1AA] hover:text-[#FF3B30]"><Trash2 size={16} /></button>
+                </div>
+              ))}
+            </div>
+          </div>
           <Btn onClick={saveProduct} className="w-full" data-testid="save-product-btn">Сохранить</Btn>
         </div>
       </Modal>

@@ -1,0 +1,72 @@
+{
+  "summary": "Iteration 2 full-stack test of RestoControl's 4 new features (recipe auto write-off, per-workshop printing + agent/emulator, split/move order, shift-close guard). Backend: added 2 pytest modules (test_printing.py 18 tests, test_features_iter2.py 11 tests) — 29/29 pass; full suite 64/66 pass (2 auth brute-force tests are flaky by design, see RCA). Verified ESC/POS payload (ESC @ init + GS V cut, CP866), ticket grouping by цех, delta send, precheck ИТОГО, void→СТОРНО job, retry→agent fetch→report, agent X-Agent-Key auth (401 on bad key), printers/agents CRUD + RBAC (403 for cashier), recipe write-off math (x1 and x3 scaling), split/move edge cases, shift-close guard. Frontend (Playwright): admin Печать page (3 seeded printers, create/edit/delete printer, create agent + copy key, jobs queue, эмулятор modal with rendered receipts), Menu тех.карта editor, Склад Остатки 90→88 / 18.5→18.2 after a UI sale with 'Продажа: Классический бургер' entries in Списания, full cashier flow (open shift → table → items → send → 'отправлено' badges + no +/- → delta line → send again → Счёт пречек → Разделить → Перенос → сторно → guard → pay → close shift 25.00 ₽), waiter RBAC (no Оплатить, no Закрыть смену). Found 1 CRITICAL POS dead-end, 1 HIGH split-visibility bug, 1 MEDIUM runtime-error overlay, plus auth-lockout design defect.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/auth/login, POST /api/auth/pin-login", "issue": "Brute-force lockout is keyed on request.client.host (ingress proxy IP, X-Forwarded-For ignored) and check_lock() runs BEFORE credential verification. Two consequences confirmed live: (a) valid credentials are rejected — after wrong-PIN attempts, POST /auth/pin-login {pin:2222} returned 429 and even admin@resto.com/admin123 returned 429, which failed 23 tests of the suite for 15 min (real-world: a few mistyped PINs lock out every cashier and the admin from the whole restaurant NAT/ingress IP); (b) it is unreliable as protection — 7 consecutive wrong passwords returned 7x401 with no 429 because requests are spread over several ingress source IPs, so no bucket reaches the threshold of 5. Key the counter on the identity (email / PIN-login endpoint) + X-Forwarded-For, and never 429 a request whose credentials are valid.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "GET /api/tables", "issue": "by_table[o['table_id']] = order keeps only ONE open order per table, so the second bill created by /orders/{id}/split is invisible in the table map and the POS loads whichever one the dict kept (root cause of the split UI bug below)."},
+      {"endpoint": "POST /api/shifts/close", "issue": "The guard counts orders({status:{$in:[open,sent]}}) globally, not for the current shift. A single stale open order (e.g. an empty order left by a void, or an order from a previous day) permanently blocks every future shift close with no API/UI way to cancel it."},
+      {"endpoint": "DELETE /api/orders/{oid}/items/{idx}", "issue": "Voiding the last item leaves an order with items:[] and total 0.0 in status open/sent. It cannot be paid (backend allows it but the UI disables Оплатить at 0 items) and there is no cancel-order endpoint exposed in the POS → blocks shift close."},
+      {"endpoint": "POST /api/orders/{oid}/split", "issue": "Split matches by product_id and takes from the first matching lines, ignoring print_status/line index. If the same dish exists as a printed line and a pending line, the cashier's selection in the UI can move the wrong (already printed) line."},
+      {"endpoint": "POST /api/orders/{oid}/request-bill", "issue": "No status check — a пречек can be printed for an already closed (paid) order."},
+      {"endpoint": "DELETE /api/orders/{oid} and other deletes", "issue": "Return {'success': true} even when deleted_count == 0 (should be 404)."},
+      {"endpoint": "POST /api/shifts/open", "issue": "Still open to any role, incl. waiter (confirmed via UI: waiter PIN 1111 opened the shift), while closing is cashier/admin-only in the UI."},
+      {"endpoint": "CORS", "issue": "allow_credentials=True with allow_origins default '*' (CORS_ORIGINS not set in backend/.env) — Starlette drops credentials; set explicit origins."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Pos.jsx voidItem + close shift", "issue": "DEAD-END: after сторно of the last item the order stays open with 0 items and 0.00 ₽. 'Оплатить' is disabled (cart empty) and there is no 'Отменить заказ' control, so 'Закрыть смену' fails forever with 'Есть незакрытые заказы (2)'. Reproduced: had to delete the empty order via API to unblock the shift. Needs auto-delete of the order when the last item is voided (or an explicit cancel-order button).", "selector": "[data-testid=\"void-0\"] / [data-testid=\"close-shift-btn\"] / [data-testid=\"checkout-btn\"]", "priority": "CRITICAL"},
+      {"component": "Pos.jsx table map after split", "issue": "After 'Разделить' both bills live on the same table but the table card shows only one of them (showed 'Стол 1 4.50 ₽' while the 25.00 ₽ remainder was hidden), and re-selecting the table loaded the SPLIT bill instead of the remainder — the other bill is unreachable until the visible one is paid. Table totals on the map are therefore wrong. Either keep a list of open orders per table (bill picker) or move the split bill to a virtual/other table.", "selector": "[data-testid^=\"pos-table-\"]", "priority": "HIGH"},
+      {"component": "admin/Printers.jsx copyKey", "issue": "navigator.clipboard.writeText(k) is called without await/try-catch. In a non-permitted clipboard context it throws NotAllowedError → unhandled rejection → full-screen CRA 'Uncaught runtime errors' overlay covers the whole Печать page (screenshot captured), while the toast still says 'Ключ скопирован'. Wrap in try/catch with a textarea fallback and only toast on success.", "selector": "[data-testid^=\"copy-agent-\"]", "priority": "MEDIUM"},
+      {"component": "Pos.jsx cart lines", "issue": "Testability: cart line testids are keyed on product_id (cart-item-{product_id}, inc-{product_id}, dec-{product_id}) and become duplicated as soon as a delta line for the same dish exists (confirmed: 2x 'Классический бургер' lines). Only void-{index} is unique. Make all cart-line testids index-based.", "selector": "[data-testid^=\"cart-item-\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Меню → Редактировать позицию / Печать → принтер", "issues": ["Category/Цех/Ед.измерения/станция use native <select> with the browser default dropdown instead of a shadcn Select — inconsistent with the dark Russian UI (same class of issue as the native date pickers on Отчёты, still present)", "Product modal does not close on Escape"]},
+      {"screen": "POS order panel", "issues": ["Trash/сторно icon on printed lines is very low-contrast (#52525B on #1A1A1A) and gives no confirmation dialog before a сторно that prints a physical ticket"]},
+      {"screen": "Печать → Очередь заданий", "issues": ["Queue is unbounded/unfiltered (30+ rows of Напечатано); no status filter or pagination, no order/table column to identify a job"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_printing.py",
+    "/app/backend/tests/test_features_iter2.py",
+    "/app/backend/tests/test_auth.py",
+    "/app/backend/tests/test_catalog.py",
+    "/app/backend/tests/test_inventory.py",
+    "/app/backend/tests/test_pos_flow.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "CRITICAL: when the last item of an order is voided, delete/cancel the order (or add an 'Отменить заказ' button) — otherwise the empty order permanently blocks 'Закрыть смену' and cannot be paid from the UI.",
+    "HIGH: support multiple open orders per table — GET /api/tables must return a list (e.g. open_orders[] with count/total) and the POS must let the cashier choose which bill to open after a split; today the remainder bill is hidden and unreachable.",
+    "HIGH: fix the login lockout: key on identity + X-Forwarded-For, evaluate the lock only for failed attempts, and never reject valid credentials (currently 429 blocks admin@resto.com and PIN 2222 for 15 min while also failing to trigger on a spread-out brute force).",
+    "MEDIUM: wrap navigator.clipboard.writeText in try/catch (with fallback) in Printers.jsx copyKey — the rejection currently raises the CRA error overlay over the whole page.",
+    "MEDIUM: make split select by cart line index (send index/print_status to the backend) so a printed line is not moved when the pending duplicate is selected.",
+    "MEDIUM: scope the shift-close guard to the current shift_id and provide a way to cancel stale orders.",
+    "MEDIUM: index-based data-testid for cart lines (cart-item-{index}, inc-{index}, dec-{index}).",
+    "LOW: reject request-bill for closed orders; return 404 from deletes when nothing was deleted; restrict /shifts/open to cashier/admin; set explicit CORS_ORIGINS.",
+    "LOW: replace native <select>/date inputs with shadcn Select/Calendar; add a confirmation dialog before сторно; add status filter to the print-jobs queue."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1370 lines in one module (models + auth + 10 resource groups + ESC/POS + agent bridge + seed) — split into routers/ and move render_escpos/build_lines/make_job into printing.py.",
+    "pay_order iterates order items and issues one inventory update + one writeoff insert per ingredient with no transaction and no balance floor: recipe write-off can drive stock negative (Говядина/Булочки already go below zero if stock is short) and a mid-loop failure leaves partial write-offs.",
+    "seed() runs on every startup and re-seeds recipes only when NO product has a recipe — after an admin clears the last recipe, a restart silently re-creates all 4 demo recipes.",
+    "void_order_item looks up the printer with {'workshop_id': removed.get('workshop_id')} — for an item without a workshop this matches the precheck printer (workshop_id: null) and prints a СТОРНО on the cash printer.",
+    "GET /api/tables collapses open orders into a dict keyed by table_id, silently discarding all but one order per table (root cause of the split bug).",
+    "@app.on_event('startup'/'shutdown') is deprecated — migrate to the lifespan context manager."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_printing.py (new)",
+    "/app/backend/tests/test_features_iter2.py (new)",
+    "/app/backend/tests/test_auth.py (pin lockout test: 15 attempts + comment on the proxy-IP flakiness)"
+  ],
+  "success_rate": {"backend": "97% (64/66 pytest pass; the 2 failures are the auth brute-force tests — flaky/defective lockout, see RCA)", "frontend": "88% (all 4 features work end-to-end; 1 critical dead-end + 1 high split-visibility bug + 1 runtime-error overlay)"},
+  "seed_data_creation": "No permanent test data left: TEST_UI_Принтер/TEST_UI_Агент and all UI-created orders were deleted, shift closed, leftover TEST_ users/writeoffs purged with tests/cleanup_test_data.py. Real inventory was consumed by the verified sales (Булочки 100→88, Говядина 20→18.2, Кофе зерно 5→4.96) and today's revenue includes the test payments.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "admin@resto.com / admin123; PIN 1111 (waiter Иван), PIN 2222 (cashier Мария) — all verified working. WARNING: never hammer wrong PINs/passwords — the per-proxy-IP lockout will 429 valid logins for 15 min; `sudo supervisorctl restart backend` clears the in-memory counters.",
+  "context_for_next_testing_agent": "pytest: /app/backend/tests — conftest.py builds admin/cashier/waiter sessions; new files test_printing.py + test_features_iter2.py cover iteration-2 features. Run serially: `pytest tests/ -n 0 -k 'not brute_force and not bruteforce'` (64 pass, ~90 s). Run the 2 brute-force tests LAST and restart the backend afterwards, otherwise every later login gets 429. Run `python tests/cleanup_test_data.py` first (a stale TEST_ staff PIN 9182 made test_catalog fail once). Frontend testids: nav-printers/nav-menu/nav-inventory/nav-staff/nav-reports/nav-admin; POS pin login = mode-staff-btn + pin-key-N + pin-submit; cart line delete = void-{index} (inc/dec are keyed by product_id and are NOT unique after a delta line). Known open bugs to re-verify after fixes: empty-order-after-void dead-end, split bill hidden on the table map, clipboard overlay on copy-agent, split-by-product_id line mismatch.",
+  "rca_of_the_issue": "1) Shift-close dead-end: DELETE /orders/{oid}/items/{idx} pops the item and recalculates totals but never deletes an order that becomes empty; close_shift counts any open/sent order, and Pos.jsx disables checkout-btn when cart.length === 0 and offers no cancel action → unrecoverable state (reproduced, unblocked only via DELETE /api/orders/{id}). 2) Split invisibility: split_order inserts the new bill with the SAME table_id, but GET /api/tables builds by_table = {table_id: order} in a loop, so only the last order per table survives; selectTable() then loads t.open_order, i.e. the wrong bill. 3) Lockout: check_lock(key) is called before credential verification with key='pin:{request.client.host}' / 'login:{ip}:{email}' — behind the k8s ingress the client host is a rotating proxy IP shared by all users, so the counter both under-counts a real attacker (7 wrong passwords stayed 401) and 429s legitimate users/admin (verified: PIN 2222 and admin@resto.com returned 429 after unrelated wrong attempts, failing 23 tests until the backend was restarted). 4) Clipboard overlay: copyKey() ignores the promise returned by navigator.clipboard.writeText, so NotAllowedError becomes an unhandled rejection and CRA renders its error overlay across the page."
+}

@@ -61,7 +61,7 @@ export function Modal({ open, onClose, title, children }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 fade-up" onClick={onClose}>
       <div
-        className="w-full max-w-md bg-[#121212] border border-[#27272A] rounded-xl p-6"
+        className="w-full max-w-md bg-[#121212] border border-[#27272A] rounded-xl p-6 max-h-[88vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-6">
