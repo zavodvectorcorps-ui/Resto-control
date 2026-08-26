@@ -15,10 +15,12 @@ from bson import ObjectId
 import logging
 import time
 import base64
+import io
 import secrets
 import bcrypt
 import jwt
 from collections import defaultdict
+from PIL import Image
 
 # ---------------------------------------------------------------------------
 # DB & App setup
@@ -329,6 +331,14 @@ class HeartbeatReq(BaseModel):
 
 class MoveReq(BaseModel):
     table_id: Optional[str] = None
+
+
+class PrintTextReq(BaseModel):
+    text: str
+
+
+class PrintImageReq(BaseModel):
+    image: str  # data URL или чистый base64
 
 
 class SplitReq(BaseModel):
@@ -1022,16 +1032,20 @@ async def make_job(order: dict, printer: dict, jtype: str, items: List[dict], su
     codepage_label = printer.get("codepage_label", "cp866")
     escape_t_value = printer.get("escape_t_value", 17)
     payload = base64.b64encode(render_escpos(lines, codepage_label, escape_t_value)).decode()
+    return await create_raw_job(printer, jtype, payload, "\n".join(lines), order_id=str(order["_id"]))
+
+
+async def create_raw_job(printer: dict, jtype: str, payload_b64: str, text_preview: str, order_id=None) -> dict:
     doc = {
-        "order_id": str(order["_id"]),
+        "order_id": order_id,
         "printer_id": str(printer["_id"]),
         "printer_name": printer["name"],
         "printer_ip": printer.get("local_ip"),
         "printer_port": printer.get("port", 9100),
         "station": printer["station"],
         "type": jtype,
-        "payload": payload,
-        "text": "\n".join(lines),
+        "payload": payload_b64,
+        "text": text_preview,
         "status": "pending",
         "attempts": 0,
         "error_message": None,
@@ -1041,6 +1055,41 @@ async def make_job(order: dict, printer: dict, jtype: str, items: List[dict], su
     }
     res = await db.print_jobs.insert_one(doc)
     return serialize(await db.print_jobs.find_one({"_id": res.inserted_id}))
+
+
+def width_dots_for(paper_width_mm: int) -> int:
+    return 384 if paper_width_mm and paper_width_mm <= 58 else 576
+
+
+def image_to_escpos(image_bytes: bytes, width_dots: int = 576) -> bytes:
+    """Конвертирует изображение в растровую ESC/POS команду GS v 0 (монохром)."""
+    img = Image.open(io.BytesIO(image_bytes)).convert("L")
+    w, h = img.size
+    if w > width_dots:
+        h = max(1, int(h * width_dots / w)); w = width_dots
+        img = img.resize((w, h))
+    max_h = 1600
+    if h > max_h:
+        w = max(1, int(w * max_h / h)); h = max_h
+        img = img.resize((w, h))
+    img = img.convert("1")  # 1-bit с дизерингом
+    px = img.load()
+    width_bytes = (w + 7) // 8
+    ESC = b"\x1b"; GS = b"\x1d"
+    buf = bytearray()
+    buf += ESC + b"@"
+    buf += ESC + b"a" + b"\x01"                      # center
+    buf += GS + b"v0" + b"\x00"                      # GS v 0, m=0
+    buf += bytes([width_bytes & 0xFF, (width_bytes >> 8) & 0xFF, h & 0xFF, (h >> 8) & 0xFF])
+    for y in range(h):
+        row = bytearray(width_bytes)
+        for x in range(w):
+            if px[x, y] == 0:                        # чёрный пиксель
+                row[x // 8] |= (0x80 >> (x % 8))
+        buf += bytes(row)
+    buf += ESC + b"a" + b"\x00"
+    buf += b"\n\n\n" + GS + b"V" + b"\x00"
+    return bytes(buf)
 
 
 # ----- Printers CRUD -----
@@ -1066,6 +1115,62 @@ async def update_printer(pid: str, req: PrinterReq, user: dict = Depends(require
 async def delete_printer(pid: str, user: dict = Depends(require_roles("admin"))):
     await db.printers.delete_one({"_id": parse_oid(pid)})
     return {"success": True}
+
+
+@api.post("/printers/{pid}/test")
+async def printer_test(pid: str, user: dict = Depends(require_roles("admin"))):
+    printer = await db.printers.find_one({"_id": parse_oid(pid)})
+    if not printer:
+        raise HTTPException(status_code=404, detail="Принтер не найден")
+    lines = [
+        "*** ТЕСТ ПЕЧАТИ ***",
+        printer["name"],
+        f"{printer.get('local_ip')}:{printer.get('port')}",
+        f"{printer.get('codepage_label')} / ESC t {printer.get('escape_t_value')}",
+        now_utc().strftime("%d.%m.%Y %H:%M"),
+        "-" * 32,
+        "Кириллица: съешь ещё этих",
+        "мягких булочек да выпей чаю",
+        "ЁЙЦУКЕН  0123456789",
+        "Цена: 1 234.50 " + chr(0x20BD),
+        "-" * 32,
+        "Если текст читается — принтер",
+        "настроен верно.",
+    ]
+    payload = base64.b64encode(render_escpos(lines, printer.get("codepage_label", "cp866"),
+                                             printer.get("escape_t_value", 17))).decode()
+    job = await create_raw_job(printer, "test", payload, "\n".join(lines))
+    return {"success": True, "job": job}
+
+
+@api.post("/printers/{pid}/print-text")
+async def printer_print_text(pid: str, req: PrintTextReq, user: dict = Depends(require_roles("admin"))):
+    printer = await db.printers.find_one({"_id": parse_oid(pid)})
+    if not printer:
+        raise HTTPException(status_code=404, detail="Принтер не найден")
+    lines = (req.text or "").split("\n") or [""]
+    payload = base64.b64encode(render_escpos(lines, printer.get("codepage_label", "cp866"),
+                                             printer.get("escape_t_value", 17))).decode()
+    job = await create_raw_job(printer, "text", payload, "\n".join(lines))
+    return {"success": True, "job": job}
+
+
+@api.post("/printers/{pid}/print-image")
+async def printer_print_image(pid: str, req: PrintImageReq, user: dict = Depends(require_roles("admin"))):
+    printer = await db.printers.find_one({"_id": parse_oid(pid)})
+    if not printer:
+        raise HTTPException(status_code=404, detail="Принтер не найден")
+    data = req.image or ""
+    if "," in data and data.strip().startswith("data:"):
+        data = data.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(data)
+        payload_bytes = image_to_escpos(raw, width_dots_for(printer.get("paper_width_mm", 80)))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Не удалось обработать изображение. Загрузите корректный PNG или JPG.")
+    payload = base64.b64encode(payload_bytes).decode()
+    job = await create_raw_job(printer, "image", payload, "🖼 Изображение отправлено на печать")
+    return {"success": True, "job": job}
 
 
 # ----- Print agents -----

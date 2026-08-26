@@ -4,11 +4,12 @@ import api, { apiErr } from "@/lib/api";
 import { toast } from "sonner";
 import {
   Plus, Trash2, Pencil, Printer, Cpu, Copy, Play, RotateCw, Wifi, WifiOff, HelpCircle,
+  FlaskConical, Type, Image as ImageIcon, Upload,
 } from "lucide-react";
 import { PageHead, Btn, Field, SelectField, Modal } from "@/components/admin/ui";
 
 const stationLabel = { kitchen: "Кухня", bar: "Бар", precheck: "Пречек (касса)" };
-const jobTypeLabel = { ticket: "Заказ", void: "Сторно", precheck: "Пречек" };
+const jobTypeLabel = { ticket: "Заказ", void: "Сторно", precheck: "Пречек", test: "Тест", text: "Текст", image: "Картинка" };
 const jobStatusStyle = {
   pending: "text-[#FACC15] bg-[#FACC1511]",
   sent: "text-[#00E5FF] bg-[#00E5FF11]",
@@ -30,6 +31,45 @@ export default function Printers() {
   const [aModal, setAModal] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [emuJobs, setEmuJobs] = useState(null);
+  const [textModal, setTextModal] = useState(null);
+  const [textValue, setTextValue] = useState("");
+  const [imageModal, setImageModal] = useState(null);
+  const [imgData, setImgData] = useState(null);
+  const [imgName, setImgName] = useState("");
+
+  const doTest = async (p) => {
+    try {
+      await api.post(`/printers/${p.id}/test`);
+      toast.success(`Тест отправлен на «${p.name}»`);
+      qc.invalidateQueries({ queryKey: ["print-jobs"] });
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  const doText = async () => {
+    if (!textValue.trim()) { toast.error("Введите текст"); return; }
+    try {
+      await api.post(`/printers/${textModal.id}/print-text`, { text: textValue });
+      toast.success("Текст отправлен на печать");
+      setTextModal(null); setTextValue("");
+      qc.invalidateQueries({ queryKey: ["print-jobs"] });
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  const onFile = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setImgName(f.name);
+    const r = new FileReader();
+    r.onload = () => setImgData(r.result);
+    r.readAsDataURL(f);
+  };
+  const doImage = async () => {
+    if (!imgData) { toast.error("Выберите изображение"); return; }
+    try {
+      await api.post(`/printers/${imageModal.id}/print-image`, { image: imgData });
+      toast.success("Изображение отправлено на печать");
+      setImageModal(null); setImgData(null); setImgName("");
+      qc.invalidateQueries({ queryKey: ["print-jobs"] });
+    } catch (e) { toast.error(apiErr(e)); }
+  };
 
   const wsName = (id) => workshops.find((w) => w.id === id)?.name || "—";
 
@@ -130,9 +170,19 @@ export default function Printers() {
               <StatusBadge s={p.status} />
             </div>
             <div className="text-xs text-[#A1A1AA] tabnum mb-3">{p.local_ip}:{p.port} · {p.codepage_label} · ESC t {p.escape_t_value} · {p.paper_width_mm}мм</div>
-            <div className="flex gap-2 justify-end">
-              <button onClick={() => openPrinter(p)} className="text-[#A1A1AA] hover:text-white" data-testid={`edit-printer-${p.id}`}><Pencil size={16} /></button>
-              <button onClick={() => delPrinter(p.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-printer-${p.id}`}><Trash2 size={16} /></button>
+            <div className="flex items-center justify-between">
+              <div className="flex gap-1.5">
+                <button onClick={() => doTest(p)} data-testid={`test-printer-${p.id}`}
+                  className="flex items-center gap-1 text-xs px-2 py-1.5 rounded-md bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E676] text-[#00E676]"><FlaskConical size={13} /> Тест</button>
+                <button onClick={() => { setTextValue(""); setTextModal(p); }} data-testid={`text-printer-${p.id}`}
+                  className="flex items-center gap-1 text-xs px-2 py-1.5 rounded-md bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E5FF] text-[#00E5FF]"><Type size={13} /> Текст</button>
+                <button onClick={() => { setImgData(null); setImgName(""); setImageModal(p); }} data-testid={`image-printer-${p.id}`}
+                  className="flex items-center gap-1 text-xs px-2 py-1.5 rounded-md bg-[#1A1A1A] border border-[#27272A] hover:border-[#A855F7] text-[#A855F7]"><ImageIcon size={13} /> Картинка</button>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => openPrinter(p)} className="text-[#A1A1AA] hover:text-white" data-testid={`edit-printer-${p.id}`}><Pencil size={16} /></button>
+                <button onClick={() => delPrinter(p.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-printer-${p.id}`}><Trash2 size={16} /></button>
+              </div>
             </div>
           </div>
         ))}
@@ -231,6 +281,37 @@ export default function Printers() {
         <div className="space-y-4">
           <Field label="Название" placeholder="Мост — зал 1 этаж" value={agentName} onChange={(e) => setAgentName(e.target.value)} data-testid="agent-name-input" />
           <Btn onClick={addAgent} className="w-full" data-testid="save-agent-btn">Создать и получить ключ</Btn>
+        </div>
+      </Modal>
+
+      {/* Custom text modal */}
+      <Modal open={!!textModal} onClose={() => setTextModal(null)} title={`Печать текста → ${textModal?.name || ""}`}>
+        <div className="space-y-4">
+          <div>
+            <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA]">Текст (каждая строка — новая строка на чеке)</label>
+            <textarea value={textValue} onChange={(e) => setTextValue(e.target.value)} rows={6} data-testid="print-text-input"
+              className="w-full mt-1 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 focus:border-[#FF5A00] outline-none font-mono text-sm resize-none"
+              placeholder="Например:&#10;С днём рождения!&#10;Скидка 10% по промокоду RESTO" />
+          </div>
+          <Btn onClick={doText} className="w-full" data-testid="send-text-btn">Отправить на печать</Btn>
+        </div>
+      </Modal>
+
+      {/* Image modal */}
+      <Modal open={!!imageModal} onClose={() => setImageModal(null)} title={`Печать картинки → ${imageModal?.name || ""}`}>
+        <div className="space-y-4">
+          <label className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-[#27272A] rounded-xl py-8 cursor-pointer hover:border-[#A855F7] transition-colors" data-testid="image-dropzone">
+            <Upload size={24} className="text-[#A1A1AA]" />
+            <span className="text-sm text-[#A1A1AA]">{imgName || "Выберите изображение (PNG/JPG)"}</span>
+            <input type="file" accept="image/*" onChange={onFile} className="hidden" data-testid="image-file-input" />
+          </label>
+          {imgData && (
+            <div className="bg-white rounded-lg p-3 flex justify-center">
+              <img src={imgData} alt="preview" className="max-h-48 object-contain" style={{ imageRendering: "pixelated" }} />
+            </div>
+          )}
+          <p className="text-xs text-[#52525B]">Изображение будет преобразовано в монохром и обрезано по ширине ленты ({imageModal?.paper_width_mm || 80}мм).</p>
+          <Btn onClick={doImage} className="w-full" data-testid="send-image-btn">Отправить на печать</Btn>
         </div>
       </Modal>
 
