@@ -54,6 +54,15 @@
 - Фронт: Reports.jsx переделан во вкладки — Продажи / Аналитика / Категории+Цеха / ABC-анализ / Удаления. recharts BarChart (по часам, по категориям/цехам гориз.), таблицы маржи и ABC с классовыми бейджами, переключатель метрики ABC. Все панели с data-testid.
 - stock-movement НЕ сделан — зависит от Задачи 2 (нужен warehouse_id).
 
+## Implemented (2026-06 — Мультитенантный фундамент) ✅ протестировано (iteration_9, 39 тестов + self-test IDOR)
+- Коллекция `restaurants` + дефолтное заведение «Мята Спортивная» (is_default). Эндпоинты: GET /restaurants, GET /restaurants/current, POST /restaurants (manager).
+- `restaurant_id` во всех сущностях: добавляется на всех insert'ах (workshops, categories, products, tables, users, shifts, orders, inventory, suppliers, invoices, writeoffs, printers, print_agents, print_jobs, order_corrections).
+- JWT несёт `rid`; get_current_user выставляет user["restaurant_id"] (из user-дока, fallback token → default).
+- Все list/read-запросы scoped по restaurant_id. Отчёты tenant-scoped.
+- Все by-id find_one/update_one/delete_one scoped → cross-tenant IDOR закрыт. Агентские эндпоинты scoped по restaurant_id агента.
+- Миграция: seed() бэкфиллит restaurant_id на все документы. Данные сохранены (products=8, orders=124, staff=3).
+- UI-переключатель заведений отложен (одно заведение). Settings (чек) пока общие.
+
 ## ОБНОВЛЁННЫЙ БРИФ (q4ubq956) — 16 задач + мультитенантность
 - Архитектурное замечание: заложить restaurant_id во ВСЕ сущности + фильтрацию в db-запросах + в JWT/сессию, дефолтный Restaurant «Мята», миграция. UI-переключатель заведения можно отложить. (НЕ сделано)
 - Задачи 0,1 — ✅ сделаны ранее. Задача 5 — ✅ сделана (кроме stock-movement).

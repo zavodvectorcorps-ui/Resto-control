@@ -142,14 +142,28 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def create_token(user_id: str, role: str) -> str:
+def create_token(user_id: str, role: str, restaurant_id: Optional[str] = None) -> str:
     payload = {
         "sub": user_id,
         "role": role,
+        "rid": restaurant_id,
         "exp": now_utc() + timedelta(days=7),
         "type": "access",
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+# --- Мультитенантность: дефолтное заведение (restaurant_id) ---
+_default_rid_cache: Optional[str] = None
+
+
+async def get_default_rid() -> Optional[str]:
+    global _default_rid_cache
+    if _default_rid_cache:
+        return _default_rid_cache
+    r = await db.restaurants.find_one({"is_default": True}) or await db.restaurants.find_one({})
+    _default_rid_cache = str(r["_id"]) if r else None
+    return _default_rid_cache
 
 
 async def get_current_user(request: Request) -> dict:
@@ -164,6 +178,7 @@ async def get_current_user(request: Request) -> dict:
             raise HTTPException(status_code=401, detail="Пользователь не найден")
         user = serialize(user)
         user.pop("password_hash", None)
+        user["restaurant_id"] = user.get("restaurant_id") or payload.get("rid") or await get_default_rid()
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Срок действия сессии истёк")
@@ -189,6 +204,12 @@ class LoginReq(BaseModel):
 
 class PinLoginReq(BaseModel):
     pin: str
+
+
+class RestaurantReq(BaseModel):
+    name: str
+    address: Optional[str] = None
+    phone: Optional[str] = None
 
 
 class WorkshopReq(BaseModel):
@@ -380,7 +401,7 @@ async def login(req: LoginReq, request: Request):
     user = await db.users.find_one({"email": email})
     if user and verify_password(req.password, user.get("password_hash", "")):
         clear_fails(key)  # валидный вход никогда не блокируется
-        token = create_token(str(user["_id"]), user["role"])
+        token = create_token(str(user["_id"]), user["role"], user.get("restaurant_id"))
         u = serialize(user)
         u.pop("password_hash", None)
         return {"token": token, "user": u}
@@ -396,7 +417,7 @@ async def pin_login(req: PinLoginReq, request: Request):
     user = await db.users.find_one({"pin": pin})
     if user:
         clear_fails(key)
-        token = create_token(str(user["_id"]), user["role"])
+        token = create_token(str(user["_id"]), user["role"], user.get("restaurant_id"))
         u = serialize(user)
         u.pop("password_hash", None)
         return {"token": token, "user": u}
@@ -415,94 +436,116 @@ async def me(user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 # Generic CRUD helpers
 # ---------------------------------------------------------------------------
-async def list_docs(coll, query=None, sort=None):
-    cursor = db[coll].find(query or {})
+async def list_docs(coll, query=None, sort=None, rid=None):
+    q = dict(query or {})
+    if rid is not None:
+        q["restaurant_id"] = rid
+    cursor = db[coll].find(q)
     if sort:
         cursor = cursor.sort(sort)
     docs = await cursor.to_list(2000)
     return [serialize(d) for d in docs]
 
 
+# ----- Restaurants (Мультитенантность) -----
+@api.get("/restaurants")
+async def get_restaurants(user: dict = Depends(get_current_user)):
+    return await list_docs("restaurants", sort=[("name", 1)])
+
+
+@api.get("/restaurants/current")
+async def current_restaurant(user: dict = Depends(get_current_user)):
+    r = await db.restaurants.find_one({"_id": parse_oid(user["restaurant_id"])}) if user.get("restaurant_id") else None
+    return serialize(r) if r else None
+
+
+@api.post("/restaurants")
+async def create_restaurant(req: RestaurantReq, user: dict = Depends(require_roles("manager"))):
+    doc = {**req.model_dump(), "is_default": False, "created_at": iso(now_utc())}
+    res = await db.restaurants.insert_one(doc)
+    return serialize(await db.restaurants.find_one({"_id": res.inserted_id}))
+
+
 # ----- Workshops (Цеха) -----
 @api.get("/workshops")
 async def get_workshops(user: dict = Depends(get_current_user)):
-    return await list_docs("workshops")
+    return await list_docs("workshops", rid=user["restaurant_id"])
 
 
 @api.post("/workshops")
 async def create_workshop(req: WorkshopReq, user: dict = Depends(require_roles("manager"))):
-    doc = {**req.model_dump(), "created_at": iso(now_utc())}
+    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
     res = await db.workshops.insert_one(doc)
     return serialize(await db.workshops.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/workshops/{wid}")
 async def update_workshop(wid: str, req: WorkshopReq, user: dict = Depends(require_roles("manager"))):
-    await db.workshops.update_one({"_id": parse_oid(wid)}, {"$set": req.model_dump()})
-    return serialize(await db.workshops.find_one({"_id": parse_oid(wid)}))
+    await db.workshops.update_one({"_id": parse_oid(wid), "restaurant_id": user["restaurant_id"]}, {"$set": req.model_dump()})
+    return serialize(await db.workshops.find_one({"_id": parse_oid(wid), "restaurant_id": user["restaurant_id"]}))
 
 
 @api.delete("/workshops/{wid}")
 async def delete_workshop(wid: str, user: dict = Depends(require_roles("manager"))):
-    await db.workshops.delete_one({"_id": parse_oid(wid)})
+    await db.workshops.delete_one({"_id": parse_oid(wid), "restaurant_id": user["restaurant_id"]})
     return {"success": True}
 
 
 # ----- Categories -----
 @api.get("/categories")
 async def get_categories(user: dict = Depends(get_current_user)):
-    return await list_docs("categories", sort=[("position", 1)])
+    return await list_docs("categories", sort=[("position", 1)], rid=user["restaurant_id"])
 
 
 @api.post("/categories")
 async def create_category(req: CategoryReq, user: dict = Depends(require_roles("manager"))):
-    doc = {**req.model_dump(), "created_at": iso(now_utc())}
+    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
     res = await db.categories.insert_one(doc)
     return serialize(await db.categories.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/categories/{cid}")
 async def update_category(cid: str, req: CategoryReq, user: dict = Depends(require_roles("manager"))):
-    await db.categories.update_one({"_id": parse_oid(cid)}, {"$set": req.model_dump()})
-    return serialize(await db.categories.find_one({"_id": parse_oid(cid)}))
+    await db.categories.update_one({"_id": parse_oid(cid), "restaurant_id": user["restaurant_id"]}, {"$set": req.model_dump()})
+    return serialize(await db.categories.find_one({"_id": parse_oid(cid), "restaurant_id": user["restaurant_id"]}))
 
 
 @api.delete("/categories/{cid}")
 async def delete_category(cid: str, user: dict = Depends(require_roles("manager"))):
-    await db.categories.delete_one({"_id": parse_oid(cid)})
+    await db.categories.delete_one({"_id": parse_oid(cid), "restaurant_id": user["restaurant_id"]})
     return {"success": True}
 
 
 # ----- Products -----
 @api.get("/products")
 async def get_products(user: dict = Depends(get_current_user)):
-    return await list_docs("products", sort=[("name", 1)])
+    return await list_docs("products", sort=[("name", 1)], rid=user["restaurant_id"])
 
 
 @api.post("/products")
 async def create_product(req: ProductReq, user: dict = Depends(require_roles("manager"))):
-    doc = {**req.model_dump(), "created_at": iso(now_utc())}
+    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
     res = await db.products.insert_one(doc)
     return serialize(await db.products.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/products/{pid}")
 async def update_product(pid: str, req: ProductReq, user: dict = Depends(require_roles("manager"))):
-    await db.products.update_one({"_id": parse_oid(pid)}, {"$set": req.model_dump()})
-    return serialize(await db.products.find_one({"_id": parse_oid(pid)}))
+    await db.products.update_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]}, {"$set": req.model_dump()})
+    return serialize(await db.products.find_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]}))
 
 
 @api.delete("/products/{pid}")
 async def delete_product(pid: str, user: dict = Depends(require_roles("manager"))):
-    await db.products.delete_one({"_id": parse_oid(pid)})
+    await db.products.delete_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]})
     return {"success": True}
 
 
 # ----- Tables -----
 @api.get("/tables")
 async def get_tables(user: dict = Depends(get_current_user)):
-    tables = await list_docs("tables", sort=[("name", 1)])
-    open_orders = await db.orders.find({"status": {"$in": ["open", "sent"]}}).to_list(2000)
+    tables = await list_docs("tables", sort=[("name", 1)], rid=user["restaurant_id"])
+    open_orders = await db.orders.find({"status": {"$in": ["open", "sent"]}, "restaurant_id": user["restaurant_id"]}).to_list(2000)
     by_table = {}
     for o in open_orders:
         if o.get("table_id"):
@@ -517,27 +560,27 @@ async def get_tables(user: dict = Depends(get_current_user)):
 
 @api.post("/tables")
 async def create_table(req: TableReq, user: dict = Depends(require_roles("manager"))):
-    doc = {**req.model_dump(), "created_at": iso(now_utc())}
+    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
     res = await db.tables.insert_one(doc)
     return serialize(await db.tables.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/tables/{tid}")
 async def update_table(tid: str, req: TableReq, user: dict = Depends(require_roles("manager"))):
-    await db.tables.update_one({"_id": parse_oid(tid)}, {"$set": req.model_dump()})
-    return serialize(await db.tables.find_one({"_id": parse_oid(tid)}))
+    await db.tables.update_one({"_id": parse_oid(tid), "restaurant_id": user["restaurant_id"]}, {"$set": req.model_dump()})
+    return serialize(await db.tables.find_one({"_id": parse_oid(tid), "restaurant_id": user["restaurant_id"]}))
 
 
 @api.delete("/tables/{tid}")
 async def delete_table(tid: str, user: dict = Depends(require_roles("manager"))):
-    await db.tables.delete_one({"_id": parse_oid(tid)})
+    await db.tables.delete_one({"_id": parse_oid(tid), "restaurant_id": user["restaurant_id"]})
     return {"success": True}
 
 
 # ----- Staff -----
 @api.get("/staff")
 async def get_staff(user: dict = Depends(require_roles("manager"))):
-    users = await db.users.find({}).to_list(2000)
+    users = await db.users.find({"restaurant_id": user["restaurant_id"]}).to_list(2000)
     out = []
     for u in users:
         u = serialize(u)
@@ -548,7 +591,7 @@ async def get_staff(user: dict = Depends(require_roles("manager"))):
 
 @api.post("/staff")
 async def create_staff(req: StaffReq, user: dict = Depends(require_roles("manager"))):
-    doc = {"name": req.name, "role": req.role, "created_at": iso(now_utc())}
+    doc = {"name": req.name, "role": req.role, "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
     if req.role in ("waiter", "admin"):
         if not req.pin:
             raise HTTPException(status_code=400, detail="PIN обязателен для официанта/администратора")
@@ -568,7 +611,7 @@ async def create_staff(req: StaffReq, user: dict = Depends(require_roles("manage
 
 @api.put("/staff/{sid}")
 async def update_staff(sid: str, req: StaffReq, user: dict = Depends(require_roles("manager"))):
-    target = await db.users.find_one({"_id": parse_oid(sid)})
+    target = await db.users.find_one({"_id": parse_oid(sid), "restaurant_id": user["restaurant_id"]})
     if not target:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     setd = {"name": req.name, "role": req.role}
@@ -595,8 +638,8 @@ async def update_staff(sid: str, req: StaffReq, user: dict = Depends(require_rol
     ops = {"$set": setd}
     if unsetd:
         ops["$unset"] = unsetd
-    await db.users.update_one({"_id": parse_oid(sid)}, ops)
-    u = serialize(await db.users.find_one({"_id": parse_oid(sid)}))
+    await db.users.update_one({"_id": parse_oid(sid), "restaurant_id": user["restaurant_id"]}, ops)
+    u = serialize(await db.users.find_one({"_id": parse_oid(sid), "restaurant_id": user["restaurant_id"]}))
     u.pop("password_hash", None)
     return u
 
@@ -605,7 +648,7 @@ async def update_staff(sid: str, req: StaffReq, user: dict = Depends(require_rol
 async def delete_staff(sid: str, user: dict = Depends(require_roles("manager"))):
     if sid == user["id"]:
         raise HTTPException(status_code=400, detail="Нельзя удалить самого себя")
-    await db.users.delete_one({"_id": parse_oid(sid)})
+    await db.users.delete_one({"_id": parse_oid(sid), "restaurant_id": user["restaurant_id"]})
     return {"success": True}
 
 
@@ -614,17 +657,18 @@ async def delete_staff(sid: str, user: dict = Depends(require_roles("manager")))
 # ---------------------------------------------------------------------------
 @api.get("/shifts/current")
 async def current_shift(user: dict = Depends(get_current_user)):
-    shift = await db.shifts.find_one({"status": "open"})
+    shift = await db.shifts.find_one({"status": "open", "restaurant_id": user["restaurant_id"]})
     return serialize(shift) if shift else None
 
 
 @api.post("/shifts/open")
 async def open_shift(user: dict = Depends(require_roles("admin"))):
-    existing = await db.shifts.find_one({"status": "open"})
+    existing = await db.shifts.find_one({"status": "open", "restaurant_id": user["restaurant_id"]})
     if existing:
         return serialize(existing)
     doc = {
         "status": "open",
+        "restaurant_id": user["restaurant_id"],
         "opened_by": user["id"],
         "opened_by_name": user.get("name", ""),
         "opened_at": iso(now_utc()),
@@ -635,7 +679,7 @@ async def open_shift(user: dict = Depends(require_roles("admin"))):
 
 @api.post("/shifts/close")
 async def close_shift(user: dict = Depends(get_current_user)):
-    shift = await db.shifts.find_one({"status": "open"})
+    shift = await db.shifts.find_one({"status": "open", "restaurant_id": user["restaurant_id"]})
     if not shift:
         raise HTTPException(status_code=400, detail="Нет открытой смены")
     open_count = await db.orders.count_documents({"status": {"$in": ["open", "sent"]}, "shift_id": str(shift["_id"])})
@@ -662,7 +706,7 @@ async def close_shift(user: dict = Depends(get_current_user)):
 
 @api.get("/shifts")
 async def list_shifts(user: dict = Depends(require_roles("manager"))):
-    return await list_docs("shifts", sort=[("opened_at", -1)])
+    return await list_docs("shifts", sort=[("opened_at", -1)], rid=user["restaurant_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -680,12 +724,12 @@ async def get_orders(status: Optional[str] = None, user: dict = Depends(get_curr
     q = {}
     if status:
         q["status"] = status
-    return await list_docs("orders", q, sort=[("created_at", -1)])
+    return await list_docs("orders", q, sort=[("created_at", -1)], rid=user["restaurant_id"])
 
 
 @api.get("/orders/{oid}")
 async def get_order(oid: str, user: dict = Depends(get_current_user)):
-    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    o = await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     return serialize(o)
@@ -693,13 +737,14 @@ async def get_order(oid: str, user: dict = Depends(get_current_user)):
 
 @api.post("/orders")
 async def create_order(req: OrderCreateReq, user: dict = Depends(get_current_user)):
-    shift = await db.shifts.find_one({"status": "open"})
+    shift = await db.shifts.find_one({"status": "open", "restaurant_id": user["restaurant_id"]})
     if not shift:
         raise HTTPException(status_code=400, detail="Смена не открыта. Откройте смену.")
     items = [i.model_dump() for i in req.items]
     items, subtotal = calc_items(items)
     doc = {
         "table_id": req.table_id,
+        "restaurant_id": user["restaurant_id"],
         "waiter_id": user["id"],
         "waiter_name": user.get("name", ""),
         "items": items,
@@ -716,7 +761,7 @@ async def create_order(req: OrderCreateReq, user: dict = Depends(get_current_use
 
 @api.put("/orders/{oid}")
 async def update_order(oid: str, req: OrderUpdateReq, user: dict = Depends(get_current_user)):
-    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    o = await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     if o["status"] == "closed":
@@ -725,20 +770,20 @@ async def update_order(oid: str, req: OrderUpdateReq, user: dict = Depends(get_c
     items, subtotal = calc_items(items)
     total = round(subtotal - o.get("discount", 0), 2)
     await db.orders.update_one(
-        {"_id": parse_oid(oid)},
+        {"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]},
         {"$set": {"items": items, "subtotal": subtotal, "total": total}},
     )
-    return serialize(await db.orders.find_one({"_id": parse_oid(oid)}))
+    return serialize(await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]}))
 
 
 @api.post("/orders/{oid}/send")
 async def send_order(oid: str, user: dict = Depends(get_current_user)):
-    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    o = await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     items = o["items"]
     pending_idx = [i for i, it in enumerate(items) if it.get("print_status", "pending") != "printed"]
-    workshops = {w["id"]: w for w in await list_docs("workshops")}
+    workshops = {w["id"]: w for w in await list_docs("workshops", rid=user["restaurant_id"])}
     groups = {}
     for i in pending_idx:
         groups.setdefault(items[i].get("workshop_id") or "none", []).append(i)
@@ -748,7 +793,7 @@ async def send_order(oid: str, user: dict = Depends(get_current_user)):
         grp_items = [items[i] for i in idxs]
         wname = workshops.get(wid, {}).get("name", "Без цеха")
         tickets[wname] = [{"name": items[i]["name"], "count": items[i]["count"]} for i in idxs]
-        printer = await db.printers.find_one({"workshop_id": wid, "active": True}) if wid != "none" else None
+        printer = await db.printers.find_one({"workshop_id": wid, "active": True, "restaurant_id": o.get("restaurant_id")}) if wid != "none" else None
         if printer:
             job = await make_job(o, printer, "ticket", grp_items)
             jobs.append(job)
@@ -757,7 +802,7 @@ async def send_order(oid: str, user: dict = Depends(get_current_user)):
         for i in idxs:
             items[i]["print_status"] = "printed"
     await db.orders.update_one(
-        {"_id": parse_oid(oid)},
+        {"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]},
         {"$set": {"items": items, "status": "sent", "sent_at": iso(now_utc())}},
     )
     return {"success": True, "tickets": tickets, "jobs": jobs}
@@ -765,14 +810,14 @@ async def send_order(oid: str, user: dict = Depends(get_current_user)):
 
 @api.post("/orders/{oid}/pay")
 async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_roles("admin"))):
-    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    o = await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     if o["status"] == "closed":
         raise HTTPException(status_code=400, detail="Заказ уже оплачен")
     total = round(o["subtotal"] - req.discount, 2)
     await db.orders.update_one(
-        {"_id": parse_oid(oid)},
+        {"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]},
         {"$set": {
             "status": "closed",
             "discount": req.discount,
@@ -788,13 +833,13 @@ async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_role
         pid = it.get("product_id", "")
         if not ObjectId.is_valid(pid):
             continue
-        prod = await db.products.find_one({"_id": ObjectId(pid)})
+        prod = await db.products.find_one({"_id": ObjectId(pid), "restaurant_id": user["restaurant_id"]})
         if not prod:
             continue
         for ing in prod.get("recipe", []):
             if not ObjectId.is_valid(ing["inventory_id"]):
                 continue
-            inv = await db.inventory.find_one({"_id": ObjectId(ing["inventory_id"])})
+            inv = await db.inventory.find_one({"_id": ObjectId(ing["inventory_id"]), "restaurant_id": user["restaurant_id"]})
             stock_unit = inv.get("measure", "kg") if inv else "kg"
             per_portion = convert_amount(ing["amount"], ing.get("unit"), stock_unit)
             amt = round(per_portion * it["count"], 4)
@@ -805,15 +850,16 @@ async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_role
             )
             await db.writeoffs.insert_one({
                 "inventory_id": ing["inventory_id"], "name": ing["name"], "amount": amt,
+                "restaurant_id": user["restaurant_id"],
                 "reason": f"Продажа: {it['name']}", "created_by": user.get("name", ""),
                 "created_at": iso(now_utc()),
             })
-    return serialize(await db.orders.find_one({"_id": parse_oid(oid)}))
+    return serialize(await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]}))
 
 
 @api.delete("/orders/{oid}")
 async def delete_order(oid: str, user: dict = Depends(get_current_user)):
-    res = await db.orders.delete_one({"_id": parse_oid(oid), "status": {"$ne": "closed"}})
+    res = await db.orders.delete_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"], "status": {"$ne": "closed"}})
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Заказ не найден или уже закрыт")
     return {"success": True}
@@ -824,59 +870,60 @@ async def delete_order(oid: str, user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 @api.get("/inventory")
 async def get_inventory(user: dict = Depends(get_current_user)):
-    return await list_docs("inventory", sort=[("name", 1)])
+    return await list_docs("inventory", sort=[("name", 1)], rid=user["restaurant_id"])
 
 
 @api.post("/inventory")
 async def create_inventory(req: InventoryItemReq, user: dict = Depends(require_roles("manager"))):
-    doc = {**req.model_dump(), "created_at": iso(now_utc())}
+    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
     res = await db.inventory.insert_one(doc)
     return serialize(await db.inventory.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/inventory/{iid}")
 async def update_inventory(iid: str, req: InventoryItemReq, user: dict = Depends(require_roles("manager"))):
-    await db.inventory.update_one({"_id": parse_oid(iid)}, {"$set": req.model_dump()})
-    return serialize(await db.inventory.find_one({"_id": parse_oid(iid)}))
+    await db.inventory.update_one({"_id": parse_oid(iid), "restaurant_id": user["restaurant_id"]}, {"$set": req.model_dump()})
+    return serialize(await db.inventory.find_one({"_id": parse_oid(iid), "restaurant_id": user["restaurant_id"]}))
 
 
 @api.delete("/inventory/{iid}")
 async def delete_inventory(iid: str, user: dict = Depends(require_roles("manager"))):
-    await db.inventory.delete_one({"_id": parse_oid(iid)})
+    await db.inventory.delete_one({"_id": parse_oid(iid), "restaurant_id": user["restaurant_id"]})
     return {"success": True}
 
 
 @api.get("/suppliers")
 async def get_suppliers(user: dict = Depends(get_current_user)):
-    return await list_docs("suppliers", sort=[("name", 1)])
+    return await list_docs("suppliers", sort=[("name", 1)], rid=user["restaurant_id"])
 
 
 @api.post("/suppliers")
 async def create_supplier(req: SupplierReq, user: dict = Depends(require_roles("manager"))):
-    doc = {**req.model_dump(), "created_at": iso(now_utc())}
+    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
     res = await db.suppliers.insert_one(doc)
     return serialize(await db.suppliers.find_one({"_id": res.inserted_id}))
 
 
 @api.delete("/suppliers/{sid}")
 async def delete_supplier(sid: str, user: dict = Depends(require_roles("manager"))):
-    await db.suppliers.delete_one({"_id": parse_oid(sid)})
+    await db.suppliers.delete_one({"_id": parse_oid(sid), "restaurant_id": user["restaurant_id"]})
     return {"success": True}
 
 
 @api.get("/invoices")
 async def get_invoices(user: dict = Depends(get_current_user)):
-    return await list_docs("invoices", sort=[("created_at", -1)])
+    return await list_docs("invoices", sort=[("created_at", -1)], rid=user["restaurant_id"])
 
 
 @api.post("/invoices")
 async def create_invoice(req: InvoiceReq, user: dict = Depends(require_roles("manager"))):
-    if await db.invoices.find_one({"number": req.number}):
+    if await db.invoices.find_one({"number": req.number, "restaurant_id": user["restaurant_id"]}):
         raise HTTPException(status_code=400, detail="Накладная с таким номером уже существует")
     items = [i.model_dump() for i in req.items]
     total = round(sum(i["amount"] * i["price"] for i in items), 2)
     doc = {
         "number": req.number,
+        "restaurant_id": user["restaurant_id"],
         "supplier_id": req.supplier_id,
         "supplier_name": req.supplier_name,
         "items": items,
@@ -896,12 +943,12 @@ async def create_invoice(req: InvoiceReq, user: dict = Depends(require_roles("ma
 
 @api.get("/writeoffs")
 async def get_writeoffs(user: dict = Depends(get_current_user)):
-    return await list_docs("writeoffs", sort=[("created_at", -1)])
+    return await list_docs("writeoffs", sort=[("created_at", -1)], rid=user["restaurant_id"])
 
 
 @api.post("/writeoffs")
 async def create_writeoff(req: WriteOffReq, user: dict = Depends(require_roles("manager"))):
-    inv = await db.inventory.find_one({"_id": parse_oid(req.inventory_id)})
+    inv = await db.inventory.find_one({"_id": parse_oid(req.inventory_id), "restaurant_id": user["restaurant_id"]})
     if not inv:
         raise HTTPException(status_code=404, detail="Позиция склада не найдена")
     if req.amount <= 0:
@@ -910,6 +957,7 @@ async def create_writeoff(req: WriteOffReq, user: dict = Depends(require_roles("
         raise HTTPException(status_code=400, detail=f"Недостаточно остатка (есть {inv.get('balance', 0)})")
     doc = {
         "inventory_id": req.inventory_id,
+        "restaurant_id": user["restaurant_id"],
         "name": inv["name"],
         "amount": req.amount,
         "reason": req.reason,
@@ -929,7 +977,7 @@ async def create_writeoff(req: WriteOffReq, user: dict = Depends(require_roles("
 @api.get("/reports/dashboard")
 async def dashboard(user: dict = Depends(require_roles("manager"))):
     today = now_utc().date().isoformat()
-    closed = await db.orders.find({"status": "closed"}).to_list(10000)
+    closed = await db.orders.find({"status": "closed", "restaurant_id": user["restaurant_id"]}).to_list(10000)
     today_orders = [o for o in closed if (o.get("closed_at") or "")[:10] == today]
     revenue_today = round(sum(o.get("total", 0) for o in today_orders), 2)
     orders_today = len(today_orders)
@@ -969,7 +1017,7 @@ async def dashboard(user: dict = Depends(require_roles("manager"))):
 @api.get("/reports/sales")
 async def sales_report(start: Optional[str] = None, end: Optional[str] = None,
                        user: dict = Depends(require_roles("manager"))):
-    closed = await db.orders.find({"status": "closed"}).to_list(10000)
+    closed = await db.orders.find({"status": "closed", "restaurant_id": user["restaurant_id"]}).to_list(10000)
     if start:
         closed = [o for o in closed if (o.get("closed_at") or "")[:10] >= start]
     if end:
@@ -1010,7 +1058,7 @@ async def sales_report(start: Optional[str] = None, end: Optional[str] = None,
 @api.get("/reports/corrections")
 async def corrections_report(start: Optional[str] = None, end: Optional[str] = None,
                              user: dict = Depends(require_roles("manager"))):
-    docs = await db.order_corrections.find({}).sort("created_at", -1).to_list(2000)
+    docs = await db.order_corrections.find({"restaurant_id": user["restaurant_id"]}).sort("created_at", -1).to_list(2000)
     out = []
     for d in docs:
         day = (d.get("created_at") or "")[:10]
@@ -1025,12 +1073,12 @@ async def corrections_report(start: Optional[str] = None, end: Optional[str] = N
 @api.get("/reports/analytics")
 async def analytics_report(start: Optional[str] = None, end: Optional[str] = None,
                            user: dict = Depends(require_roles("manager"))):
-    closed = await db.orders.find({"status": "closed"}).to_list(20000)
+    closed = await db.orders.find({"status": "closed", "restaurant_id": user["restaurant_id"]}).to_list(20000)
     if start:
         closed = [o for o in closed if (o.get("closed_at") or "")[:10] >= start]
     if end:
         closed = [o for o in closed if (o.get("closed_at") or "")[:10] <= end]
-    prods = await db.products.find({}).to_list(3000)
+    prods = await db.products.find({"restaurant_id": user["restaurant_id"]}).to_list(3000)
     cost_by_id = {str(p["_id"]): p.get("cost", 0) for p in prods}
     cost_by_name = {p["name"]: p.get("cost", 0) for p in prods}
 
@@ -1070,8 +1118,8 @@ async def analytics_report(start: Optional[str] = None, end: Optional[str] = Non
     }
 
 
-async def _closed_in_range(start, end):
-    closed = await db.orders.find({"status": "closed"}).to_list(20000)
+async def _closed_in_range(start, end, rid):
+    closed = await db.orders.find({"status": "closed", "restaurant_id": rid}).to_list(20000)
     if start:
         closed = [o for o in closed if (o.get("closed_at") or "")[:10] >= start]
     if end:
@@ -1082,10 +1130,10 @@ async def _closed_in_range(start, end):
 @api.get("/reports/by-category")
 async def report_by_category(start: Optional[str] = None, end: Optional[str] = None,
                              user: dict = Depends(require_roles("manager"))):
-    closed = await _closed_in_range(start, end)
-    prods = await db.products.find({}).to_list(3000)
+    closed = await _closed_in_range(start, end, user["restaurant_id"])
+    prods = await db.products.find({"restaurant_id": user["restaurant_id"]}).to_list(3000)
     cat_of_prod = {str(p["_id"]): p.get("category_id") for p in prods}
-    cats = await db.categories.find({}).to_list(1000)
+    cats = await db.categories.find({"restaurant_id": user["restaurant_id"]}).to_list(1000)
     cat_name = {str(c["_id"]): c["name"] for c in cats}
     agg = {}
     for o in closed:
@@ -1105,8 +1153,8 @@ async def report_by_category(start: Optional[str] = None, end: Optional[str] = N
 @api.get("/reports/by-workshop")
 async def report_by_workshop(start: Optional[str] = None, end: Optional[str] = None,
                              user: dict = Depends(require_roles("manager"))):
-    closed = await _closed_in_range(start, end)
-    ws = await db.workshops.find({}).to_list(1000)
+    closed = await _closed_in_range(start, end, user["restaurant_id"])
+    ws = await db.workshops.find({"restaurant_id": user["restaurant_id"]}).to_list(1000)
     ws_name = {str(w["_id"]): w["name"] for w in ws}
     agg = {}
     for o in closed:
@@ -1126,7 +1174,7 @@ async def report_by_workshop(start: Optional[str] = None, end: Optional[str] = N
 @api.get("/reports/abc")
 async def report_abc(start: Optional[str] = None, end: Optional[str] = None,
                      metric: str = "revenue", user: dict = Depends(require_roles("manager"))):
-    closed = await _closed_in_range(start, end)
+    closed = await _closed_in_range(start, end, user["restaurant_id"])
     agg = {}
     for o in closed:
         for it in o.get("items", []):
@@ -1253,6 +1301,7 @@ async def make_job(order: dict, printer: dict, jtype: str, items: List[dict], su
 async def create_raw_job(printer: dict, jtype: str, payload_b64: str, text_preview: str, order_id=None) -> dict:
     doc = {
         "order_id": order_id,
+        "restaurant_id": printer.get("restaurant_id"),
         "printer_id": str(printer["_id"]),
         "printer_name": printer["name"],
         "printer_ip": printer.get("local_ip"),
@@ -1389,31 +1438,31 @@ async def delete_logo(user: dict = Depends(require_roles("manager"))):
 # ----- Printers CRUD -----
 @api.get("/printers")
 async def list_printers(user: dict = Depends(get_current_user)):
-    return await list_docs("printers", sort=[("name", 1)])
+    return await list_docs("printers", sort=[("name", 1)], rid=user["restaurant_id"])
 
 
 @api.post("/printers")
 async def create_printer(req: PrinterReq, user: dict = Depends(require_roles("manager"))):
-    doc = {**req.model_dump(), "status": "unknown", "last_seen_at": None, "created_at": iso(now_utc())}
+    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "status": "unknown", "last_seen_at": None, "created_at": iso(now_utc())}
     res = await db.printers.insert_one(doc)
     return serialize(await db.printers.find_one({"_id": res.inserted_id}))
 
 
 @api.patch("/printers/{pid}")
 async def update_printer(pid: str, req: PrinterReq, user: dict = Depends(require_roles("manager"))):
-    await db.printers.update_one({"_id": parse_oid(pid)}, {"$set": req.model_dump()})
-    return serialize(await db.printers.find_one({"_id": parse_oid(pid)}))
+    await db.printers.update_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]}, {"$set": req.model_dump()})
+    return serialize(await db.printers.find_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]}))
 
 
 @api.delete("/printers/{pid}")
 async def delete_printer(pid: str, user: dict = Depends(require_roles("manager"))):
-    await db.printers.delete_one({"_id": parse_oid(pid)})
+    await db.printers.delete_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]})
     return {"success": True}
 
 
 @api.post("/printers/{pid}/test")
 async def printer_test(pid: str, user: dict = Depends(require_roles("manager"))):
-    printer = await db.printers.find_one({"_id": parse_oid(pid)})
+    printer = await db.printers.find_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]})
     if not printer:
         raise HTTPException(status_code=404, detail="Принтер не найден")
     lines = [
@@ -1439,7 +1488,7 @@ async def printer_test(pid: str, user: dict = Depends(require_roles("manager")))
 
 @api.post("/printers/{pid}/print-text")
 async def printer_print_text(pid: str, req: PrintTextReq, user: dict = Depends(require_roles("manager"))):
-    printer = await db.printers.find_one({"_id": parse_oid(pid)})
+    printer = await db.printers.find_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]})
     if not printer:
         raise HTTPException(status_code=404, detail="Принтер не найден")
     lines = (req.text or "").split("\n") or [""]
@@ -1451,7 +1500,7 @@ async def printer_print_text(pid: str, req: PrintTextReq, user: dict = Depends(r
 
 @api.post("/printers/{pid}/print-image")
 async def printer_print_image(pid: str, req: PrintImageReq, user: dict = Depends(require_roles("manager"))):
-    printer = await db.printers.find_one({"_id": parse_oid(pid)})
+    printer = await db.printers.find_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]})
     if not printer:
         raise HTTPException(status_code=404, detail="Принтер не найден")
     data = req.image or ""
@@ -1470,12 +1519,12 @@ async def printer_print_image(pid: str, req: PrintImageReq, user: dict = Depends
 # ----- Print agents -----
 @api.get("/agents")
 async def list_agents(user: dict = Depends(require_roles("manager"))):
-    return await list_docs("print_agents", sort=[("created_at", -1)])
+    return await list_docs("print_agents", sort=[("created_at", -1)], rid=user["restaurant_id"])
 
 
 @api.post("/agents")
 async def create_agent(req: AgentReq, user: dict = Depends(require_roles("manager"))):
-    doc = {"name": req.name, "api_key": secrets.token_hex(24),
+    doc = {"name": req.name, "restaurant_id": user["restaurant_id"], "api_key": secrets.token_hex(24),
            "last_heartbeat_at": None, "created_at": iso(now_utc())}
     res = await db.print_agents.insert_one(doc)
     return serialize(await db.print_agents.find_one({"_id": res.inserted_id}))
@@ -1483,38 +1532,38 @@ async def create_agent(req: AgentReq, user: dict = Depends(require_roles("manage
 
 @api.delete("/agents/{aid}")
 async def delete_agent(aid: str, user: dict = Depends(require_roles("manager"))):
-    await db.print_agents.delete_one({"_id": parse_oid(aid)})
+    await db.print_agents.delete_one({"_id": parse_oid(aid), "restaurant_id": user["restaurant_id"]})
     return {"success": True}
 
 
 # ----- Print jobs (admin view) -----
 @api.get("/print-jobs")
 async def list_print_jobs(user: dict = Depends(require_roles("manager"))):
-    docs = await db.print_jobs.find({}).sort("created_at", -1).to_list(200)
+    docs = await db.print_jobs.find({"restaurant_id": user["restaurant_id"]}).sort("created_at", -1).to_list(200)
     return [serialize(d) for d in docs]
 
 
 @api.post("/print-jobs/{jid}/retry")
 async def retry_print_job(jid: str, user: dict = Depends(require_roles("manager"))):
-    job = await db.print_jobs.find_one({"_id": parse_oid(jid)})
+    job = await db.print_jobs.find_one({"_id": parse_oid(jid), "restaurant_id": user["restaurant_id"]})
     if not job:
         raise HTTPException(status_code=404, detail="Задание не найдено")
     await db.print_jobs.update_one(
-        {"_id": parse_oid(jid)},
+        {"_id": parse_oid(jid), "restaurant_id": user["restaurant_id"]},
         {"$set": {"status": "pending", "error_message": None, "sent_at": None, "printed_at": None}},
     )
-    return serialize(await db.print_jobs.find_one({"_id": parse_oid(jid)}))
+    return serialize(await db.print_jobs.find_one({"_id": parse_oid(jid), "restaurant_id": user["restaurant_id"]}))
 
 
 # ----- Order printing actions -----
 @api.post("/orders/{oid}/request-bill")
 async def request_bill(oid: str, user: dict = Depends(get_current_user)):
-    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    o = await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     if o["status"] == "closed":
         raise HTTPException(status_code=400, detail="Заказ уже закрыт")
-    printer = await db.printers.find_one({"station": "precheck", "active": True})
+    printer = await db.printers.find_one({"station": "precheck", "active": True, "restaurant_id": o.get("restaurant_id")})
     if not printer:
         raise HTTPException(status_code=400, detail="Не настроен принтер пречека (станция precheck)")
     job = await make_job(o, printer, "precheck", o["items"], o.get("subtotal"))
@@ -1523,7 +1572,7 @@ async def request_bill(oid: str, user: dict = Depends(get_current_user)):
 
 @api.delete("/orders/{oid}/items/{idx}")
 async def void_order_item(oid: str, idx: int, req: VoidItemReq = VoidItemReq(), user: dict = Depends(get_current_user)):
-    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    o = await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     if o["status"] == "closed":
@@ -1548,6 +1597,7 @@ async def void_order_item(oid: str, idx: int, req: VoidItemReq = VoidItemReq(), 
             confirmer = serialize(cu)
         await db.order_corrections.insert_one({
             "order_id": str(o["_id"]),
+            "restaurant_id": o.get("restaurant_id") or user["restaurant_id"],
             "item_name": removed.get("name", ""),
             "item_price": removed.get("price", 0),
             "staff_id": confirmer["id"],
@@ -1558,7 +1608,7 @@ async def void_order_item(oid: str, idx: int, req: VoidItemReq = VoidItemReq(), 
     items.pop(idx)
     void_job = None
     if removed.get("print_status") == "printed" and removed.get("workshop_id"):
-        printer = await db.printers.find_one({"workshop_id": removed.get("workshop_id"), "active": True})
+        printer = await db.printers.find_one({"workshop_id": removed.get("workshop_id"), "active": True, "restaurant_id": o.get("restaurant_id")})
         if printer:
             void_job = await make_job(o, printer, "void", [removed])
     if not items:
@@ -1575,7 +1625,7 @@ async def void_order_item(oid: str, idx: int, req: VoidItemReq = VoidItemReq(), 
 
 @api.post("/orders/{oid}/move")
 async def move_order(oid: str, req: MoveReq, user: dict = Depends(get_current_user)):
-    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    o = await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     if o["status"] == "closed":
@@ -1586,7 +1636,7 @@ async def move_order(oid: str, req: MoveReq, user: dict = Depends(get_current_us
 
 @api.post("/orders/{oid}/split")
 async def split_order(oid: str, req: SplitReq, user: dict = Depends(get_current_user)):
-    o = await db.orders.find_one({"_id": parse_oid(oid)})
+    o = await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     if o["status"] == "closed":
@@ -1607,6 +1657,7 @@ async def split_order(oid: str, req: SplitReq, user: dict = Depends(get_current_
     )
     new_doc = {
         "table_id": o.get("table_id"),
+        "restaurant_id": o.get("restaurant_id") or user["restaurant_id"],
         "waiter_id": o.get("waiter_id"),
         "waiter_name": o.get("waiter_name", ""),
         "items": new_items,
@@ -1636,12 +1687,12 @@ async def get_agent(request: Request) -> dict:
 
 @api.get("/agent/printers")
 async def agent_printers(agent: dict = Depends(get_agent)):
-    return await list_docs("printers")
+    return await list_docs("printers", rid=agent.get("restaurant_id"))
 
 
 @api.get("/agent/print-jobs")
 async def agent_fetch_jobs(agent: dict = Depends(get_agent)):
-    jobs = await db.print_jobs.find({"status": "pending"}).sort("created_at", 1).to_list(50)
+    jobs = await db.print_jobs.find({"status": "pending", "restaurant_id": agent.get("restaurant_id")}).sort("created_at", 1).to_list(50)
     out = []
     for j in jobs:
         r = await db.print_jobs.update_one(
@@ -1660,7 +1711,7 @@ async def agent_report_job(jid: str, req: JobReport, agent: dict = Depends(get_a
         upd["printed_at"] = iso(now_utc())
     if req.status == "failed":
         upd["error_message"] = req.error_message
-    await db.print_jobs.update_one({"_id": parse_oid(jid)}, {"$set": upd, "$inc": {"attempts": 1}})
+    await db.print_jobs.update_one({"_id": parse_oid(jid), "restaurant_id": agent.get("restaurant_id")}, {"$set": upd, "$inc": {"attempts": 1}})
     return {"success": True}
 
 
@@ -1670,7 +1721,7 @@ async def agent_heartbeat(req: HeartbeatReq, agent: dict = Depends(get_agent)):
     for pid, status in (req.printers or {}).items():
         if ObjectId.is_valid(pid):
             await db.printers.update_one(
-                {"_id": ObjectId(pid)}, {"$set": {"status": status, "last_seen_at": iso(now_utc())}}
+                {"_id": ObjectId(pid), "restaurant_id": agent.get("restaurant_id")}, {"$set": {"status": status, "last_seen_at": iso(now_utc())}}
             )
     return {"success": True}
 
@@ -1678,7 +1729,7 @@ async def agent_heartbeat(req: HeartbeatReq, agent: dict = Depends(get_agent)):
 @api.post("/agent/emulate")
 async def emulate_agent(user: dict = Depends(require_roles("manager"))):
     """Симуляция локального агента: печатает все ожидающие задания (для демо в облаке)."""
-    jobs = await db.print_jobs.find({"status": {"$in": ["pending", "sent"]}}).sort("created_at", 1).to_list(100)
+    jobs = await db.print_jobs.find({"status": {"$in": ["pending", "sent"]}, "restaurant_id": user["restaurant_id"]}).sort("created_at", 1).to_list(100)
     processed = []
     for j in jobs:
         await db.print_jobs.update_one(
@@ -1689,7 +1740,7 @@ async def emulate_agent(user: dict = Depends(require_roles("manager"))):
         j2 = serialize(j)
         j2["status"] = "printed"
         processed.append(j2)
-    await db.printers.update_many({}, {"$set": {"status": "online", "last_seen_at": iso(now_utc())}})
+    await db.printers.update_many({"restaurant_id": user["restaurant_id"]}, {"$set": {"status": "online", "last_seen_at": iso(now_utc())}})
     return {"processed": len(processed), "jobs": processed}
 
 
@@ -1709,6 +1760,16 @@ app.add_middleware(
 @app.on_event("startup")
 async def seed():
     await db.users.create_index("pin", sparse=True)
+
+    # --- Мультитенантность: дефолтное заведение (restaurant_id) ---
+    global _default_rid_cache
+    rest = await db.restaurants.find_one({"is_default": True})
+    if not rest:
+        res = await db.restaurants.insert_one({
+            "name": "Мята Спортивная", "is_default": True, "created_at": iso(now_utc())})
+        rest = await db.restaurants.find_one({"_id": res.inserted_id})
+    default_rid = str(rest["_id"])
+    _default_rid_cache = default_rid
 
     # --- Задача 0: одноразовая миграция ролей (old admin->manager, old cashier->admin) ---
     if not await db.settings.find_one({"key": "role_migration_v1"}):
@@ -1854,6 +1915,14 @@ async def seed():
             recipe = [{"inventory_id": inv[n], "name": n, "amount": a} for n, a in ings if n in inv]
             if recipe:
                 await db.products.update_one({"name": pname}, {"$set": {"recipe": recipe}})
+
+    # Мультитенантность: бэкфилл restaurant_id на все существующие/сид-документы, где его нет
+    tenant_collections = ["users", "workshops", "categories", "products", "tables",
+                          "inventory", "suppliers", "invoices", "writeoffs", "orders",
+                          "shifts", "printers", "print_agents", "print_jobs", "order_corrections"]
+    for c in tenant_collections:
+        await db[c].update_many({"restaurant_id": {"$exists": False}},
+                                {"$set": {"restaurant_id": default_rid}})
 
     logger.info("Seed complete")
 

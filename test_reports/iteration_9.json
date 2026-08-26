@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 9: verified the multi-tenancy foundation (restaurant_id on all entities + JWT restaurant scope) caused no regressions. New suite /app/backend/tests/test_multitenancy_iter9.py (39 tests) all pass: manager login JWT carries rid, PIN logins 1111/2222 carry rid, /auth/me returns restaurant_id, /restaurants/current returns 'Мята Спортивная' and matches me.restaurant_id, all 7 required list endpoints (products, categories, workshops, tables, inventory, staff, printers) non-empty with correct restaurant_id on every doc and no _id leakage, other lists (suppliers/invoices/writeoffs/orders/shifts/agents/print-jobs) 200, full POS write flow (shift open -> waiter order with restaurant_id -> update -> send -> admin pay -> closed -> table freed -> shift close/reopen), all 7 report endpoints 200 with data, role protection (waiter+admin PIN => 403 on POST /products and GET /reports/sales; 401 without/with bad token). Full existing regression suite: 154 passed / 1 flaky network timeout (re-ran clean), 2 xfail, 1 xpass. Frontend smoke: manager login -> /admin, all 8 admin pages render seeded data with zero console/page errors; POS via waiter PIN shows 8 tables, order create + send-to-kitchen works; admin PIN pays the order (receipt shown, table freed). One latent multi-tenant security defect found (by-ID endpoints not tenant-scoped).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "PUT/DELETE /api/products/{id}, GET /api/orders/{id} (and all other by-ID handlers: categories, workshops, tables, inventory, printers, staff, orders/{id}/pay|send|move|split|items)", "issue": "Cross-tenant IDOR: by-ID handlers do find_one({'_id': ...}) with NO restaurant_id filter. Proven: a product inserted with restaurant_id='ffff...' was successfully PUT (renamed) and DELETEd by the manager of 'Мята Спортивная' (200), and an order of another restaurant was readable via GET /api/orders/{id} (200). List endpoints are correctly scoped, so this is latent while only one restaurant exists, but it breaks the tenancy model as soon as a 2nd restaurant is added.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "GET /api/restaurants", "issue": "Returns ALL restaurants unscoped to any user/tenant (list_docs called without rid) — will leak other tenants' names once >1 restaurant exists"},
+      {"endpoint": "get_current_user", "issue": "Falls back to get_default_rid() when the user doc and JWT both lack a rid — a user belonging to no restaurant silently gets the default tenant's data instead of 401/403"},
+      {"endpoint": "POST /api/restaurants", "issue": "Creates a restaurant but provisions no manager/staff for it and there is no way to obtain a token scoped to it, so new tenants are unreachable (expected until switcher is built, but worth noting)"},
+      {"endpoint": "POST /api/shifts/close", "issue": "Open-order count and totals query by shift_id only (no restaurant_id); safe today because shift_id is unique, but inconsistent with the new scoping convention"}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/admin (all pages) and /pos header", "issues": ["No indication of the current restaurant anywhere in the UI (GET /api/restaurants/current is never consumed by the frontend) — users cannot tell which tenant they are working in"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_multitenancy_iter9.py",
+    "/app/test_reports/pytest/iter9_multitenancy.xml",
+    "/app/test_reports/pytest/iter9_full.xml"
+  ],
+  "action_items": [
+    "Scope every by-ID handler by restaurant_id (e.g. find_one({'_id': parse_oid(id), 'restaurant_id': user['restaurant_id']}) -> 404) — products/categories/workshops/tables/inventory/printers/staff/orders and all order sub-actions",
+    "Scope GET /api/restaurants (or restrict to the caller's restaurant / a superadmin role)",
+    "Decide on strict behaviour when a user has no restaurant_id instead of silently falling back to the default tenant",
+    "Optional UX: surface the current restaurant name (from /api/restaurants/current) in the admin sidebar / POS header"
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1932 lines — split into routers (auth, catalog, pos, inventory, reports, printing) before adding the tenant switcher",
+    "Tenant filtering is applied ad-hoc per query site; introduce a single helper (e.g. tenant_filter(user, extra) / get_one_scoped(coll, id, rid)) so by-ID handlers cannot be forgotten again — this is exactly what caused the IDOR above",
+    "_default_rid_cache is a module-level global cache with no invalidation; fine for one tenant, but will serve a stale rid if the default restaurant is changed at runtime"
+  ],
+  "updated_files": ["/app/backend/tests/test_multitenancy_iter9.py"],
+  "success_rate": {"backend": "100% (39/39 new tenancy tests; 154/155 full suite, 1 flaky network timeout that passed on retry)", "frontend": "100% of smoke flows passed (admin 8 pages, POS waiter order, POS admin payment)"},
+  "seed_data_creation": "None persisted. One test order created and paid via API and one via UI (both closed); leftover open orders from an earlier failed assertion were deleted; a temporary foreign-tenant product/order used for the IDOR proof was removed from Mongo.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "manager admin@resto.com/admin123; PIN admin 2222, waiter 1111",
+  "context_for_next_testing_agent": "Tenancy regression suite: /app/backend/tests/test_multitenancy_iter9.py (uses conftest fixtures admin/waiter/cashier, API from /app/frontend/.env). Notes: tables have no 'status' field — occupancy is expressed via open_orders/open_order/open_total; POST /api/shifts/open takes no body and is admin(PIN)-only; POST /api/orders items require product_id+name+price+count; POST /api/orders/{id}/pay takes {payment_method, discount} and is admin-only. Shift must be open for order creation. After the IDOR fix, re-run the cross-tenant check: insert a doc with a bogus restaurant_id and confirm by-ID GET/PUT/DELETE return 404.",
+  "rca_of_the_issue": "The refactor injected restaurant_id into list_docs() and into all insert payloads, but single-document lookups (find_one by _id) were left untouched, so read/update/delete by id bypass tenant isolation. Reproduction: insert a product with restaurant_id='ffffffffffffffffffffffff', then PUT /api/products/{id} with the manager token -> 200 and the doc is modified; DELETE -> 200; GET /api/orders/{id} of a foreign order -> 200. Mitigation: add the tenant filter to every by-ID query and raise 404 on miss."
+}
