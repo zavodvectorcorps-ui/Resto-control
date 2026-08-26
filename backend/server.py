@@ -1022,6 +1022,134 @@ async def corrections_report(start: Optional[str] = None, end: Optional[str] = N
     return out
 
 
+@api.get("/reports/analytics")
+async def analytics_report(start: Optional[str] = None, end: Optional[str] = None,
+                           user: dict = Depends(require_roles("manager"))):
+    closed = await db.orders.find({"status": "closed"}).to_list(20000)
+    if start:
+        closed = [o for o in closed if (o.get("closed_at") or "")[:10] >= start]
+    if end:
+        closed = [o for o in closed if (o.get("closed_at") or "")[:10] <= end]
+    prods = await db.products.find({}).to_list(3000)
+    cost_by_id = {str(p["_id"]): p.get("cost", 0) for p in prods}
+    cost_by_name = {p["name"]: p.get("cost", 0) for p in prods}
+
+    by_hour = {h: 0.0 for h in range(24)}
+    total = 0.0
+    margin_map = {}
+    for o in closed:
+        total += o.get("total", 0)
+        ca = o.get("closed_at") or ""
+        try:
+            h = int(ca[11:13])
+        except Exception:
+            h = 0
+        by_hour[h] = by_hour.get(h, 0) + o.get("total", 0)
+        for it in o.get("items", []):
+            c = cost_by_id.get(it.get("product_id"))
+            if c is None:
+                c = cost_by_name.get(it["name"], 0)
+            m = margin_map.setdefault(it["name"], {"name": it["name"], "qty": 0, "revenue": 0.0, "cost": 0.0})
+            m["qty"] += it["count"]
+            m["revenue"] += it.get("total", it["price"] * it["count"])
+            m["cost"] += (c or 0) * it["count"]
+
+    orders = len(closed)
+    margin = []
+    for m in margin_map.values():
+        rev, cost = round(m["revenue"], 2), round(m["cost"], 2)
+        margin.append({"name": m["name"], "qty": m["qty"], "revenue": rev, "cost": cost,
+                       "margin": round(rev - cost, 2),
+                       "margin_pct": round((rev - cost) / rev * 100, 1) if rev else 0})
+    margin.sort(key=lambda x: x["margin"], reverse=True)
+    return {
+        "total": round(total, 2), "orders": orders,
+        "avg_check": round(total / orders, 2) if orders else 0,
+        "by_hour": [{"hour": f"{h:02d}", "revenue": round(by_hour[h], 2)} for h in range(24)],
+        "margin_by_product": margin,
+    }
+
+
+async def _closed_in_range(start, end):
+    closed = await db.orders.find({"status": "closed"}).to_list(20000)
+    if start:
+        closed = [o for o in closed if (o.get("closed_at") or "")[:10] >= start]
+    if end:
+        closed = [o for o in closed if (o.get("closed_at") or "")[:10] <= end]
+    return closed
+
+
+@api.get("/reports/by-category")
+async def report_by_category(start: Optional[str] = None, end: Optional[str] = None,
+                             user: dict = Depends(require_roles("manager"))):
+    closed = await _closed_in_range(start, end)
+    prods = await db.products.find({}).to_list(3000)
+    cat_of_prod = {str(p["_id"]): p.get("category_id") for p in prods}
+    cats = await db.categories.find({}).to_list(1000)
+    cat_name = {str(c["_id"]): c["name"] for c in cats}
+    agg = {}
+    for o in closed:
+        for it in o.get("items", []):
+            cid = cat_of_prod.get(it.get("product_id"))
+            key = cid or "none"
+            label = cat_name.get(cid, "Без категории")
+            a = agg.setdefault(key, {"name": label, "count": 0, "revenue": 0.0})
+            a["count"] += it["count"]
+            a["revenue"] += it.get("total", it["price"] * it["count"])
+    rows = sorted(agg.values(), key=lambda x: x["revenue"], reverse=True)
+    for r in rows:
+        r["revenue"] = round(r["revenue"], 2)
+    return {"rows": rows, "total": round(sum(r["revenue"] for r in rows), 2)}
+
+
+@api.get("/reports/by-workshop")
+async def report_by_workshop(start: Optional[str] = None, end: Optional[str] = None,
+                             user: dict = Depends(require_roles("manager"))):
+    closed = await _closed_in_range(start, end)
+    ws = await db.workshops.find({}).to_list(1000)
+    ws_name = {str(w["_id"]): w["name"] for w in ws}
+    agg = {}
+    for o in closed:
+        for it in o.get("items", []):
+            wid = it.get("workshop_id")
+            key = wid or "none"
+            label = ws_name.get(wid, "Без цеха")
+            a = agg.setdefault(key, {"name": label, "count": 0, "revenue": 0.0})
+            a["count"] += it["count"]
+            a["revenue"] += it.get("total", it["price"] * it["count"])
+    rows = sorted(agg.values(), key=lambda x: x["revenue"], reverse=True)
+    for r in rows:
+        r["revenue"] = round(r["revenue"], 2)
+    return {"rows": rows, "total": round(sum(r["revenue"] for r in rows), 2)}
+
+
+@api.get("/reports/abc")
+async def report_abc(start: Optional[str] = None, end: Optional[str] = None,
+                     metric: str = "revenue", user: dict = Depends(require_roles("manager"))):
+    closed = await _closed_in_range(start, end)
+    agg = {}
+    for o in closed:
+        for it in o.get("items", []):
+            a = agg.setdefault(it["name"], {"name": it["name"], "count": 0, "revenue": 0.0})
+            a["count"] += it["count"]
+            a["revenue"] += it.get("total", it["price"] * it["count"])
+    key = "count" if metric == "count" else "revenue"
+    rows = sorted(agg.values(), key=lambda x: x[key], reverse=True)
+    grand = sum(r[key] for r in rows) or 1
+    cum = 0.0
+    out = []
+    for r in rows:
+        cum += r[key]
+        share = cum / grand * 100
+        cls = "A" if share <= 80 else ("B" if share <= 95 else "C")
+        out.append({"name": r["name"], "count": r["count"], "revenue": round(r["revenue"], 2),
+                    "cum_pct": round(share, 1), "abc": cls})
+    return {"rows": out, "metric": metric,
+            "total": round(sum(r["revenue"] for r in rows), 2)}
+
+
+
+
 # ---------------------------------------------------------------------------
 # PRINTING — ESC/POS rendering, printers, print jobs, agent bridge API
 # ---------------------------------------------------------------------------

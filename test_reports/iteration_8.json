@@ -1,0 +1,40 @@
+{
+  "summary": "Task 5 (Advanced Analytics/Reports) tested end-to-end. Backend: 21 pytest cases across /api/reports/sales, /analytics, /by-category, /by-workshop, /abc, /corrections — all 21 passed (shape, math consistency, sorting, cum_pct monotonicity + ~100% terminal value, ABC class monotonicity, date-range filtering, cross-report total reconciliation, 403 for waiter/admin-PIN tokens, 401/403 without auth). Frontend: manager email/password login -> /admin/reports, all 5 tabs render and load data; found and fixed a real UI defect where the local Card component swallowed data-testid so ABC and Удаления panels had no test ids (panels rendered but were untestable/unidentifiable). After fix all tabs, ABC metric switch (revenue->count reorders rows), charts, margin table, and date filters verified working.",
+  "backend_issues": {"critical": [], "minor": [
+    {"endpoint": "/api/reports/abc", "issue": "metric query param is not validated (any value silently falls back to revenue) — prefer Literal['revenue','count'] to return 422 on bad input"},
+    {"endpoint": "/api/reports/*", "issue": "Date filtering is done in Python after fetching up to 20000 orders (to_list) instead of a Mongo query on closed_at — will not scale"}
+  ]},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Reports.jsx Card", "issue": "FIXED by tester: Card component did not forward extra props, so data-testid=report-panel-abc and report-panel-corrections were never emitted to the DOM", "selector": "[data-testid=\"report-panel-abc\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/admin/reports", "issues": [
+        "Date range uses native browser date inputs (type=date) instead of the shadcn calendar/popover used elsewhere — inconsistent with dark theme (light native picker panel)",
+        "ABC metric selector is a raw native <select> (light-on-dark OS dropdown) instead of shadcn Select",
+        "No loading/error UI states: every useQuery destructures only data with defaults, so a failed report request shows an empty/zeroed panel with no feedback",
+        "Category chart shows a 'Без категории ×1' row (Чай, revenue 2.00 ₽) — product has no category_id in seed data; cosmetic data-quality issue"
+      ]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_reports_iter8.py", "/app/test_reports/pytest/iter8_reports.xml"],
+  "action_items": [
+    "Add isLoading/isError handling to the 6 useQuery calls in Reports.jsx (currently silent failures)",
+    "Replace native date inputs / native select on Reports page with shadcn Calendar + Select for theme consistency",
+    "Validate abc metric with Literal type; consider Mongo-side date filtering for report queries",
+    "Optional: assign a category to seed product 'Чай' to remove the 'Без категории' bucket"
+  ],
+  "critical_code_review_comments": [
+    "Reports.jsx: shared Card helper must spread ...rest — silently dropping props broke test ids (fixed); watch for the same pattern in other admin pages",
+    "reports endpoints load full order collections into memory; add indexed Mongo filters on status/closed_at"
+  ],
+  "updated_files": ["/app/frontend/src/pages/admin/Reports.jsx", "/app/backend/tests/test_reports_iter8.py"],
+  "success_rate": {"backend": "100% (21/21)", "frontend": "100% after the data-testid fix"},
+  "seed_data_creation": "None — used existing seeded closed orders (124 orders, 1841.50 ₽ in last 7 days)",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "manager admin@resto.com/admin123; PIN waiter 1111, admin 2222",
+  "context_for_next_testing_agent": "Report endpoints regression suite lives at /app/backend/tests/test_reports_iter8.py (uses conftest admin/waiter/cashier fixtures). Reports UI testids: report-tab-{sales,analytics,category,abc,corrections}, report-panel-*, margin-row-i, cat-row-i, ws-row-i, abc-row-i, abc-metric, report-start/report-end. Only Task 5 was in scope this iteration.",
+  "rca_of_the_issue": "ABC/corrections panels appeared missing to automation because Reports.jsx's Card = ({children, className}) destructured only those props; data-testid passed to <Card> was discarded. Fixed by spreading ...rest onto the wrapper div; verified both panels are now locatable and populated."
+}
