@@ -24,6 +24,7 @@ export default function Printers() {
   const { data: workshops = [] } = useQuery({ queryKey: ["workshops"], queryFn: async () => (await api.get("/workshops")).data });
   const { data: agents = [] } = useQuery({ queryKey: ["agents"], queryFn: async () => (await api.get("/agents")).data });
   const { data: jobs = [] } = useQuery({ queryKey: ["print-jobs"], queryFn: async () => (await api.get("/print-jobs")).data, refetchInterval: 4000 });
+  const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: async () => (await api.get("/settings")).data });
 
   const [pModal, setPModal] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -36,6 +37,38 @@ export default function Printers() {
   const [imageModal, setImageModal] = useState(null);
   const [imgData, setImgData] = useState(null);
   const [imgName, setImgName] = useState("");
+  const [logoModal, setLogoModal] = useState(false);
+  const [logoData, setLogoData] = useState(null);
+
+  const onLogoFile = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => setLogoData(r.result);
+    r.readAsDataURL(f);
+  };
+  const saveLogo = async () => {
+    if (!logoData) { toast.error("Выберите изображение"); return; }
+    try {
+      await api.put("/settings/logo", { image: logoData });
+      toast.success("Логотип сохранён");
+      setLogoModal(false); setLogoData(null);
+      qc.invalidateQueries({ queryKey: ["settings"] });
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  const toggleLogo = async (enabled) => {
+    try {
+      await api.put("/settings/logo", { enabled });
+      qc.invalidateQueries({ queryKey: ["settings"] });
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+  const removeLogo = async () => {
+    try {
+      await api.delete("/settings/logo");
+      toast.success("Логотип удалён");
+      qc.invalidateQueries({ queryKey: ["settings"] });
+    } catch (e) { toast.error(apiErr(e)); }
+  };
 
   const doTest = async (p) => {
     try {
@@ -154,6 +187,32 @@ export default function Printers() {
     <div>
       <PageHead title="Печать" subtitle="Принтеры по цехам, агенты-мосты и очередь заданий"
         action={<Btn onClick={() => openPrinter(null)} data-testid="add-printer-btn"><Plus size={16} className="inline mr-1" /> Принтер</Btn>} />
+
+      {/* Logo on receipts */}
+      <div className="bg-[#121212] border border-[#27272A] rounded-xl p-5 mb-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <div className="w-24 h-16 rounded-lg bg-white flex items-center justify-center overflow-hidden shrink-0">
+            {settings?.logo_image
+              ? <img src={settings.logo_image} alt="logo" className="max-h-full max-w-full object-contain" data-testid="logo-preview" />
+              : <ImageIcon className="text-[#52525B]" size={22} />}
+          </div>
+          <div>
+            <div className="font-semibold">Логотип на чеках</div>
+            <div className="text-xs text-[#A1A1AA]">Печатается в шапке заказных чеков и пречеков</div>
+            {settings?.logo_image && !settings?.logo_enabled && <div className="text-xs text-[#FACC15] mt-1">Загружен, но выключен</div>}
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          {settings?.logo_image && (
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input type="checkbox" checked={!!settings?.logo_enabled} onChange={(e) => toggleLogo(e.target.checked)} className="accent-[#FF5A00] w-4 h-4" data-testid="logo-toggle" />
+              Печатать
+            </label>
+          )}
+          <Btn variant="ghost" onClick={() => { setLogoData(null); setLogoModal(true); }} data-testid="upload-logo-btn"><Upload size={16} className="inline mr-1" /> {settings?.logo_image ? "Заменить" : "Загрузить"}</Btn>
+          {settings?.logo_image && <button onClick={removeLogo} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid="remove-logo-btn"><Trash2 size={16} /></button>}
+        </div>
+      </div>
 
       {/* Printers */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-10">
@@ -281,6 +340,24 @@ export default function Printers() {
         <div className="space-y-4">
           <Field label="Название" placeholder="Мост — зал 1 этаж" value={agentName} onChange={(e) => setAgentName(e.target.value)} data-testid="agent-name-input" />
           <Btn onClick={addAgent} className="w-full" data-testid="save-agent-btn">Создать и получить ключ</Btn>
+        </div>
+      </Modal>
+
+      {/* Logo upload modal */}
+      <Modal open={logoModal} onClose={() => setLogoModal(false)} title="Логотип заведения">
+        <div className="space-y-4">
+          <label className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-[#27272A] rounded-xl py-8 cursor-pointer hover:border-[#FF5A00] transition-colors">
+            <Upload size={24} className="text-[#A1A1AA]" />
+            <span className="text-sm text-[#A1A1AA]">Выберите изображение (PNG/JPG)</span>
+            <input type="file" accept="image/*" onChange={onLogoFile} className="hidden" data-testid="logo-file-input" />
+          </label>
+          {(logoData || settings?.logo_image) && (
+            <div className="bg-white rounded-lg p-3 flex justify-center">
+              <img src={logoData || settings.logo_image} alt="logo preview" className="max-h-40 object-contain" />
+            </div>
+          )}
+          <p className="text-xs text-[#52525B]">Лучше использовать монохромное лого. Будет преобразовано в чёрно-белое и вписано по ширине ленты каждого принтера.</p>
+          <Btn onClick={saveLogo} className="w-full" data-testid="save-logo-btn">Сохранить и включить</Btn>
         </div>
       </Modal>
 

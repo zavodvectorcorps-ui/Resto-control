@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS: автозапуск агента печати RestoControl через launchd.
+
+  1) Узнайте путь к node:            which node        (напр. /usr/local/bin/node или /opt/homebrew/bin/node)
+  2) Отредактируйте пути ниже:
+       - ProgramArguments: путь к node и путь к agent.js
+       - WorkingDirectory: папка с agent.js
+  3) Скопируйте файл и загрузите:
+       cp com.restocontrol.agent.plist ~/Library/LaunchAgents/
+       launchctl load  ~/Library/LaunchAgents/com.restocontrol.agent.plist
+     Остановить/выгрузить:
+       launchctl unload ~/Library/LaunchAgents/com.restocontrol.agent.plist
+
+  Логи: /tmp/restocontrol-agent.out и /tmp/restocontrol-agent.err
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.restocontrol.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/node</string>
+        <string>/Users/ЗАМЕНИТЕ/resto-agent/agent.js</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/ЗАМЕНИТЕ/resto-agent</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/restocontrol-agent.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/restocontrol-agent.err</string>
+</dict>
+</plist>

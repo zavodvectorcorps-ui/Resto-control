@@ -341,6 +341,11 @@ class PrintImageReq(BaseModel):
     image: str  # data URL или чистый base64
 
 
+class LogoReq(BaseModel):
+    image: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
 class SplitReq(BaseModel):
     indices: List[int]
 
@@ -970,7 +975,8 @@ def escpos_encode(text: str, codepage_label: str) -> bytes:
         return text.encode("cp866", errors="replace")
 
 
-def render_escpos(lines: List[str], codepage_label: str = "cp866", escape_t_value: int = 17) -> bytes:
+def render_escpos(lines: List[str], codepage_label: str = "cp866", escape_t_value: int = 17,
+                  logo_raster: Optional[bytes] = None) -> bytes:
     """Собирает ESC/POS буфер. Кодовая страница задаётся ТОЛЬКО полем принтера
     escape_t_value (ESC t <n>) — это эмпирическое число под конкретную модель, а не
     производное от названия кодировки. Кириллица кодируется в codepage_label (cp866)."""
@@ -978,6 +984,8 @@ def render_escpos(lines: List[str], codepage_label: str = "cp866", escape_t_valu
     GS = b"\x1d"
     buf = bytearray()
     buf += ESC + b"@"                                # init/reset
+    if logo_raster:
+        buf += ESC + b"a" + b"\x01" + logo_raster + ESC + b"a" + b"\x00" + b"\n"  # логотип по центру
     buf += ESC + b"t" + bytes([escape_t_value & 0xFF])  # select code page (per-printer)
     if lines:
         # заголовок: по центру, жирный, двойная высота (кросс-принтерные команды)
@@ -1031,7 +1039,8 @@ async def make_job(order: dict, printer: dict, jtype: str, items: List[dict], su
     lines = build_lines(jtype, table_name, order.get("waiter_name", ""), items, subtotal)
     codepage_label = printer.get("codepage_label", "cp866")
     escape_t_value = printer.get("escape_t_value", 17)
-    payload = base64.b64encode(render_escpos(lines, codepage_label, escape_t_value)).decode()
+    logo = await logo_raster_for(printer)
+    payload = base64.b64encode(render_escpos(lines, codepage_label, escape_t_value, logo_raster=logo)).decode()
     return await create_raw_job(printer, jtype, payload, "\n".join(lines), order_id=str(order["_id"]))
 
 
@@ -1061,35 +1070,86 @@ def width_dots_for(paper_width_mm: int) -> int:
     return 384 if paper_width_mm and paper_width_mm <= 58 else 576
 
 
-def image_to_escpos(image_bytes: bytes, width_dots: int = 576) -> bytes:
-    """Конвертирует изображение в растровую ESC/POS команду GS v 0 (монохром)."""
+def _b64_from_dataurl(s: str) -> str:
+    if s and "," in s and s.strip().startswith("data:"):
+        return s.split(",", 1)[1]
+    return s or ""
+
+
+def _raster_bytes(image_bytes: bytes, width_dots: int = 576, max_h: int = 1600) -> bytes:
+    """Только команда растрового изображения GS v 0 (без init/cut/выравнивания)."""
     img = Image.open(io.BytesIO(image_bytes)).convert("L")
     w, h = img.size
     if w > width_dots:
         h = max(1, int(h * width_dots / w)); w = width_dots
         img = img.resize((w, h))
-    max_h = 1600
     if h > max_h:
         w = max(1, int(w * max_h / h)); h = max_h
         img = img.resize((w, h))
-    img = img.convert("1")  # 1-bit с дизерингом
+    img = img.convert("1")
     px = img.load()
     width_bytes = (w + 7) // 8
-    ESC = b"\x1b"; GS = b"\x1d"
+    GS = b"\x1d"
     buf = bytearray()
-    buf += ESC + b"@"
-    buf += ESC + b"a" + b"\x01"                      # center
-    buf += GS + b"v0" + b"\x00"                      # GS v 0, m=0
+    buf += GS + b"v0" + b"\x00"
     buf += bytes([width_bytes & 0xFF, (width_bytes >> 8) & 0xFF, h & 0xFF, (h >> 8) & 0xFF])
     for y in range(h):
         row = bytearray(width_bytes)
         for x in range(w):
-            if px[x, y] == 0:                        # чёрный пиксель
+            if px[x, y] == 0:
                 row[x // 8] |= (0x80 >> (x % 8))
         buf += bytes(row)
-    buf += ESC + b"a" + b"\x00"
-    buf += b"\n\n\n" + GS + b"V" + b"\x00"
     return bytes(buf)
+
+
+def image_to_escpos(image_bytes: bytes, width_dots: int = 576) -> bytes:
+    ESC = b"\x1b"; GS = b"\x1d"
+    raster = _raster_bytes(image_bytes, width_dots)
+    return bytes(ESC + b"@" + ESC + b"a" + b"\x01" + raster + ESC + b"a" + b"\x00" + b"\n\n\n" + GS + b"V" + b"\x00")
+
+
+async def logo_raster_for(printer: dict) -> Optional[bytes]:
+    """Растр логотипа заведения под ширину ленты конкретного принтера (если включён)."""
+    s = await db.settings.find_one({"key": "venue"})
+    if not s or not s.get("logo_enabled") or not s.get("logo_image"):
+        return None
+    try:
+        raw = base64.b64decode(_b64_from_dataurl(s["logo_image"]))
+        return _raster_bytes(raw, width_dots_for(printer.get("paper_width_mm", 80)), max_h=400)
+    except Exception:
+        return None
+
+
+@api.get("/settings")
+async def get_settings(user: dict = Depends(get_current_user)):
+    doc = await db.settings.find_one({"key": "venue"})
+    if not doc:
+        return {"logo_enabled": False, "logo_image": None}
+    return {"logo_enabled": bool(doc.get("logo_enabled")), "logo_image": doc.get("logo_image")}
+
+
+@api.put("/settings/logo")
+async def set_logo(req: LogoReq, user: dict = Depends(require_roles("admin"))):
+    update = {}
+    if req.image is not None:
+        # валидируем, что это корректное изображение
+        try:
+            Image.open(io.BytesIO(base64.b64decode(_b64_from_dataurl(req.image)))).verify()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Не удалось обработать изображение. Загрузите корректный PNG или JPG.")
+        update["logo_image"] = req.image
+        update["logo_enabled"] = True if req.enabled is None else req.enabled
+    if req.enabled is not None:
+        update["logo_enabled"] = req.enabled
+    await db.settings.update_one({"key": "venue"}, {"$set": {"key": "venue", **update}}, upsert=True)
+    doc = await db.settings.find_one({"key": "venue"})
+    return {"logo_enabled": bool(doc.get("logo_enabled")), "logo_image": doc.get("logo_image")}
+
+
+@api.delete("/settings/logo")
+async def delete_logo(user: dict = Depends(require_roles("admin"))):
+    await db.settings.update_one({"key": "venue"}, {"$set": {"key": "venue", "logo_image": None, "logo_enabled": False}}, upsert=True)
+    return {"success": True}
 
 
 # ----- Printers CRUD -----
