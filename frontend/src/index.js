@@ -15,7 +15,7 @@ root.render(
   <QueryClientProvider client={queryClient}>
     <AuthProvider>
       <App />
-      <Toaster position="bottom-right" theme="dark" richColors />
+      <Toaster position="top-center" theme="dark" richColors />
     </AuthProvider>
   </QueryClientProvider>
 );

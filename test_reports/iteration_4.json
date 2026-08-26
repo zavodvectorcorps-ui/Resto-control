@@ -1,0 +1,30 @@
+{
+  "summary": "Frontend-only verification of the new POS void-confirmation dialog (Pos.jsx). Logged in via PIN 2222 (Кассир Мария), opened shift, and ran 5 UI scenarios on the public preview URL. All 4 requested scenarios plus 1 extra (partial void of a multi-item printed order) PASSED. No console errors, no error elements on page, no leftover open orders (all 8 tables show 'Свободен' after cleanup).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "POS order view",
+        "issues": [
+          "Sonner toast ('Заказ отправлен на кухню' / 'СТОРНО отправлено на цех') renders bottom-right and overlaps the primary 'Оплатить' button — cosmetic, does not block clicks after toast dismissal but can hide the CTA for ~4s."
+        ]
+      }
+    ]
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Pos.jsx requestVoid(): for a non-printed (pending) line it calls store.removeItem(index) only — local state. If the order already exists in DB (e.g. it was persisted earlier by 'Счёт'/'Перенос' which call saveOrder), the pending line remains in Mongo until the next saveOrder/send/pay. Consider calling the DELETE /orders/{id}/items/{idx} endpoint when store.orderId exists, even for pending items, to keep client and server in sync.",
+    "Kitchen tickets modal: the X (tickets-close-btn) both closes the modal AND navigates back to the tables screen, while clicking the overlay only closes the modal. Inconsistent close behaviour — minor UX."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "not tested (frontend-only request)", "frontend": "100% (5/5 scenarios)" },
+  "seed_data_creation": "None persisted. Temporary orders on Стол 1 and Стол 2 were created and fully voided/cancelled during testing. NOTE: a cashier shift was opened by the test (open-shift-btn) and is still OPEN — no open orders remain, so shift close is clean.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": false,
+  "test_credentials": "Cashier PIN 2222 (from /app/memory/test_credentials.md)",
+  "context_for_next_testing_agent": "Void confirmation flow verified end-to-end: pending void = instant (no dialog); printed void = dialog 'Сторнировать позицию?' with void-cancel-btn/void-confirm-btn; cancel keeps item with 'отправлено' badge; confirm voids (toast 'СТОРНО отправлено на цех' when other items remain, 'Заказ отменён' + return to 'Выберите стол' when it was the last item). Test flow tips: after send-kitchen-btn a tickets modal appears — close it by clicking the overlay (page.mouse.click(30,30)), NOT tickets-close-btn (that navigates back to tables). Cashier shift is currently open.",
+  "rca_of_the_issue": "N/A — no defects found in the tested feature."
+}

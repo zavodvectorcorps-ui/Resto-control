@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import {
   ChefHat, LogOut, Plus, Minus, Trash2, Send, CreditCard, Grid3x3,
   ArrowLeft, Power, Printer, Banknote, X, Utensils,
-  Receipt, ArrowRightLeft, Scissors, Check,
+  Receipt, ArrowRightLeft, Scissors, Check, AlertTriangle,
 } from "lucide-react";
 
 const money = (n) => `${Number(n || 0).toFixed(2)} ₽`;
@@ -31,6 +31,7 @@ export default function Pos() {
   const [splitOpen, setSplitOpen] = useState(false);
   const [splitSel, setSplitSel] = useState({});
   const [billPicker, setBillPicker] = useState(null);
+  const [voidConfirm, setVoidConfirm] = useState(null);
 
   const { data: shift, refetch: refetchShift } = useQuery({ queryKey: ["shift"], queryFn: async () => (await api.get("/shifts/current")).data });
   const { data: tables = [], refetch: refetchTables } = useQuery({ queryKey: ["pos-tables"], queryFn: async () => (await api.get("/tables")).data });
@@ -131,6 +132,22 @@ export default function Pos() {
       refetchTables();
       toast.success(`Отдельный счёт создан: ${money(data.split.total)}`);
     } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const requestVoid = (index, it) => {
+    if (it.print_status === "printed") {
+      setVoidConfirm({ index, name: it.name, count: it.count });
+    } else if (store.orderId) {
+      voidItem(index);
+    } else {
+      store.removeItem(index);
+    }
+  };
+
+  const confirmVoid = async () => {
+    const index = voidConfirm.index;
+    setVoidConfirm(null);
+    await voidItem(index);
   };
 
   const voidItem = async (index) => {
@@ -272,7 +289,7 @@ export default function Pos() {
                         {it.name}
                         {printed && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#00E5FF11] text-[#00E5FF] font-semibold">отправлено</span>}
                       </span>
-                      <button onClick={() => voidItem(index)} className="text-[#71717A] hover:text-[#FF3B30]" data-testid={`void-${index}`} title={printed ? "Сторно" : "Удалить"}><Trash2 size={14} /></button>
+                      <button onClick={() => requestVoid(index, it)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`void-${index}`} title={printed ? "Сторно" : "Удалить"}><Trash2 size={14} /></button>
                     </div>
                     <div className="flex justify-between items-center">
                       {printed ? (
@@ -383,6 +400,31 @@ export default function Pos() {
               ))}
               <button onClick={() => window.print()} data-testid="print-tickets-btn" className="w-full bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E5FF] text-[#00E5FF] rounded-lg py-3 font-semibold flex items-center justify-center gap-2">
                 <Printer size={18} /> Печать
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Void confirmation (сторно уже отправленной позиции) */}
+      {voidConfirm && (
+        <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4" onClick={() => setVoidConfirm(null)}>
+          <div className="w-full max-w-sm bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()}>
+            <div className="w-12 h-12 rounded-xl bg-[#FF3B3011] text-[#FF3B30] flex items-center justify-center mb-4">
+              <AlertTriangle size={24} />
+            </div>
+            <h3 className="font-head text-xl font-bold mb-2">Сторнировать позицию?</h3>
+            <p className="text-sm text-[#A1A1AA] mb-6">
+              «{voidConfirm.name}» ×{voidConfirm.count} уже отправлена на цех. Будет напечатан чек <span className="text-white font-semibold">СТОРНО</span> на кухню/бар.
+            </p>
+            <div className="flex gap-3">
+              <button onClick={() => setVoidConfirm(null)} data-testid="void-cancel-btn"
+                className="flex-1 bg-[#1A1A1A] border border-[#27272A] hover:border-[#A1A1AA] text-white rounded-lg py-3 font-semibold active:scale-95 transition-transform">
+                Отмена
+              </button>
+              <button onClick={confirmVoid} data-testid="void-confirm-btn"
+                className="flex-1 bg-[#FF3B30] hover:bg-[#e0342a] text-white rounded-lg py-3 font-semibold active:scale-95 transition-transform">
+                Сторнировать
               </button>
             </div>
           </div>
