@@ -12,9 +12,12 @@ export const usePosStore = create((set, get) => ({
   loadCart: (items, orderId, tableId, tableName) =>
     set({ cart: items || [], orderId, tableId, tableName }),
 
-  addItem: (product) => {
+  addItem: (product, selectedModifiers = []) => {
     const cart = [...get().cart];
-    const idx = cart.findIndex((c) => c.product_id === product.id && c.print_status !== "printed");
+    const key = JSON.stringify((selectedModifiers || []).map((m) => m.option_id).sort());
+    const idx = cart.findIndex(
+      (c) => c.product_id === product.id && c.print_status !== "printed" &&
+        JSON.stringify((c.selected_modifiers || []).map((m) => m.option_id).sort()) === key);
     if (idx >= 0) {
       cart[idx] = { ...cart[idx], count: cart[idx].count + 1 };
     } else {
@@ -25,6 +28,7 @@ export const usePosStore = create((set, get) => ({
         count: 1,
         workshop_id: product.workshop_id || null,
         print_status: "pending",
+        selected_modifiers: selectedModifiers || [],
       });
     }
     set({ cart });
@@ -40,5 +44,6 @@ export const usePosStore = create((set, get) => ({
 
   clear: () => set({ cart: [], orderId: null, tableId: null, tableName: "" }),
 
-  subtotal: () => get().cart.reduce((s, c) => s + c.price * c.count, 0),
+  subtotal: () => get().cart.reduce(
+    (s, c) => s + (c.price + (c.selected_modifiers || []).reduce((a, m) => a + (m.price_delta || 0), 0)) * c.count, 0),
 }));

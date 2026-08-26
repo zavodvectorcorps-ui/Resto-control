@@ -16,6 +16,7 @@ const TABS = [
   ["analytics", "Аналитика"],
   ["category", "Категории / Цеха"],
   ["abc", "ABC-анализ"],
+  ["warehouse", "Склад"],
   ["corrections", "Удаления"],
 ];
 
@@ -35,9 +36,15 @@ export default function Reports() {
   const [tab, setTab] = useState("sales");
 
   const range = `?start=${start}&end=${end}`;
+  const [salesGroup, setSalesGroup] = useState("");
   const { data = {} } = useQuery({
     queryKey: ["sales", start, end],
     queryFn: async () => (await api.get(`/reports/sales${range}`)).data,
+  });
+  const { data: byClient = {} } = useQuery({
+    queryKey: ["sales-client", start, end],
+    queryFn: async () => (await api.get(`/reports/sales${range}&group_by=client`)).data,
+    enabled: tab === "sales" && salesGroup === "client",
   });
   const { data: analytics = {} } = useQuery({
     queryKey: ["analytics", start, end],
@@ -64,6 +71,17 @@ export default function Reports() {
     queryKey: ["corrections", start, end],
     queryFn: async () => (await api.get(`/reports/corrections${range}`)).data,
     enabled: tab === "corrections",
+  });
+  const [whFilter, setWhFilter] = useState("");
+  const { data: invReport = {} } = useQuery({
+    queryKey: ["rep-inventory", whFilter],
+    queryFn: async () => (await api.get(`/reports/inventory${whFilter ? `?warehouse_id=${whFilter}` : ""}`)).data,
+    enabled: tab === "warehouse",
+  });
+  const { data: movement = {} } = useQuery({
+    queryKey: ["stock-movement", start, end, whFilter],
+    queryFn: async () => (await api.get(`/reports/stock-movement${range}${whFilter ? `&warehouse_id=${whFilter}` : ""}`)).data,
+    enabled: tab === "warehouse",
   });
 
   const payData = [
@@ -99,6 +117,36 @@ export default function Reports() {
 
       {tab === "sales" && (
         <div data-testid="report-panel-sales">
+          <div className="flex gap-2 mb-6">
+            <button onClick={() => setSalesGroup("")} data-testid="sales-group-none"
+              className={`px-4 py-2 rounded-lg text-sm font-semibold ${salesGroup === "" ? "bg-[#FF5A00] text-white" : "bg-[#121212] border border-[#27272A] text-[#A1A1AA]"}`}>Общий</button>
+            <button onClick={() => setSalesGroup("client")} data-testid="sales-group-client"
+              className={`px-4 py-2 rounded-lg text-sm font-semibold ${salesGroup === "client" ? "bg-[#FF5A00] text-white" : "bg-[#121212] border border-[#27272A] text-[#A1A1AA]"}`}>По клиентам</button>
+          </div>
+          {salesGroup === "client" ? (
+            <Card>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-head text-lg font-bold">Продажи по клиентам</h3>
+                <span className="text-sm text-[#A1A1AA]">Скидок выдано: <span className="text-[#FF3B30] tabnum">{money(byClient.total_discount)}</span></span>
+              </div>
+              <table className="w-full text-sm">
+                <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
+                  <th className="text-left p-3">Клиент</th><th className="text-right p-3">Заказов</th><th className="text-right p-3">Скидка</th><th className="text-right p-3">Выручка</th></tr></thead>
+                <tbody>
+                  {(byClient.rows || []).map((r, i) => (
+                    <tr key={i} className="border-b border-[#1A1A1A]" data-testid={`client-sales-row-${i}`}>
+                      <td className="p-3 font-medium">{r.client_name}</td>
+                      <td className="p-3 text-right tabnum text-[#A1A1AA]">{r.order_count}</td>
+                      <td className="p-3 text-right tabnum text-[#FF3B30]">{money(r.total_discount)}</td>
+                      <td className="p-3 text-right tabnum text-[#00E676]">{money(r.total_revenue)}</td>
+                    </tr>
+                  ))}
+                  {(byClient.rows || []).length === 0 && <tr><td colSpan="4" className="p-6 text-center text-[#52525B]">Нет продаж по клиентам</td></tr>}
+                </tbody>
+              </table>
+            </Card>
+          ) : (
+          <>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
             {[["Всего", data.total, "#FF5A00"], ["Наличные", data.cash, "#00E676"], ["Карта", data.card, "#00E5FF"], ["Чеков", data.orders, "#A855F7"]].map(([l, v, c], i) => (
               <Card key={i}>
@@ -144,6 +192,8 @@ export default function Reports() {
               </div>
             </Card>
           </div>
+          </>
+          )}
         </div>
       )}
 
@@ -271,6 +321,63 @@ export default function Reports() {
             </table>
           </div>
         </Card>
+      )}
+
+      {tab === "warehouse" && (
+        <div data-testid="report-panel-warehouse">
+          <div className="mb-6">
+            <select value={whFilter} onChange={(e) => setWhFilter(e.target.value)} data-testid="rep-wh-filter"
+              className="bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 text-sm outline-none focus:border-[#FF5A00]">
+              <option value="">Все склады</option>
+              {(invReport.warehouses || movement.warehouses || []).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+            </select>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Card>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-head text-lg font-bold">Остатки по складам</h3>
+                <span className="text-sm text-[#A1A1AA]">Итого: <span className="text-[#00E676] tabnum font-semibold">{money(invReport.total_value)}</span></span>
+              </div>
+              <div className="overflow-x-auto max-h-96">
+                <table className="w-full text-sm">
+                  <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
+                    <th className="text-left p-3">Позиция</th><th className="text-left p-3">Склад</th><th className="text-right p-3">Кол-во</th><th className="text-right p-3">Сумма</th></tr></thead>
+                  <tbody>
+                    {(invReport.rows || []).map((r, i) => (
+                      <tr key={i} className="border-b border-[#1A1A1A]" data-testid={`inv-report-row-${i}`}>
+                        <td className="p-3 font-medium">{r.name}</td>
+                        <td className="p-3 text-[#A1A1AA]">{r.warehouse_name}</td>
+                        <td className="p-3 text-right tabnum">{r.quantity} {r.measure}</td>
+                        <td className="p-3 text-right tabnum text-[#00E676]">{money(r.value)}</td>
+                      </tr>
+                    ))}
+                    {(invReport.rows || []).length === 0 && <tr><td colSpan="4" className="p-6 text-center text-[#52525B]">Нет остатков</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+            <Card>
+              <h3 className="font-head text-lg font-bold mb-4">Движение за период</h3>
+              <div className="overflow-x-auto max-h-96">
+                <table className="w-full text-sm">
+                  <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
+                    <th className="text-left p-3">Позиция</th><th className="text-right p-3">Приход</th><th className="text-right p-3">Расход</th><th className="text-right p-3">Итого</th></tr></thead>
+                  <tbody>
+                    {(movement.rows || []).map((r, i) => (
+                      <tr key={i} className="border-b border-[#1A1A1A]" data-testid={`movement-row-${i}`}>
+                        <td className="p-3 font-medium">{r.name}</td>
+                        <td className="p-3 text-right tabnum text-[#00E676]">+{r.in_qty}</td>
+                        <td className="p-3 text-right tabnum text-[#FF3B30]">-{r.out_qty}</td>
+                        <td className={`p-3 text-right tabnum font-semibold ${r.net >= 0 ? "text-[#00E676]" : "text-[#FF3B30]"}`}>{r.net}</td>
+                      </tr>
+                    ))}
+                    {(movement.rows || []).length === 0 && <tr><td colSpan="4" className="p-6 text-center text-[#52525B]">Нет движений</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          </div>
+        </div>
       )}
 
       {tab === "corrections" && (

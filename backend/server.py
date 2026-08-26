@@ -4,6 +4,7 @@ import os
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+import re
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
 from starlette.middleware.cors import CORSMiddleware
@@ -217,6 +218,11 @@ class WorkshopReq(BaseModel):
     color: Optional[str] = "#00E5FF"
 
 
+class WarehouseReq(BaseModel):
+    name: str
+    workshop_id: Optional[str] = None
+
+
 class CategoryReq(BaseModel):
     name: str
     color: Optional[str] = "#FF5A00"
@@ -228,6 +234,28 @@ class RecipeIngredient(BaseModel):
     name: str
     amount: float
     unit: Optional[str] = None  # единица, в которой задан amount (kg/g/l/ml/pcs); None = единица склада
+    processing_method: Optional[str] = None  # cold | boil | fry | stew | bake
+
+
+class ModifierGroupReq(BaseModel):
+    name: str
+    selection_type: str = "single"  # single | multiple
+    min_count: int = 0
+    max_count: int = 1
+
+    @field_validator("selection_type")
+    @classmethod
+    def _valid_type(cls, v):
+        if v not in ("single", "multiple"):
+            raise ValueError("selection_type must be 'single' or 'multiple'")
+        return v
+
+
+class ModifierOptionReq(BaseModel):
+    name: str
+    price_delta: float = 0.0
+    inventory_id: Optional[str] = None
+    amount: Optional[float] = None
 
 
 class ProductReq(BaseModel):
@@ -236,10 +264,12 @@ class ProductReq(BaseModel):
     workshop_id: Optional[str] = None
     price: float = 0.0
     cost: float = 0.0
+    cost_source: str = "manual"  # auto | manual
     measure: str = "pcs"
     image: Optional[str] = None
     for_sale: bool = True
     recipe: List[RecipeIngredient] = []
+    modifier_group_ids: List[str] = []
 
 
 class TableReq(BaseModel):
@@ -263,6 +293,13 @@ class StaffReq(BaseModel):
         return v
 
 
+class SelectedModifier(BaseModel):
+    group_id: str
+    option_id: str
+    name: str
+    price_delta: float = 0.0
+
+
 class OrderItemReq(BaseModel):
     product_id: str
     name: str
@@ -271,20 +308,25 @@ class OrderItemReq(BaseModel):
     workshop_id: Optional[str] = None
     print_status: str = "pending"
     print_job_id: Optional[str] = None
+    selected_modifiers: List[SelectedModifier] = []
 
 
 class OrderCreateReq(BaseModel):
     table_id: Optional[str] = None
+    client_id: Optional[str] = None
     items: List[OrderItemReq] = []
 
 
 class OrderUpdateReq(BaseModel):
     items: List[OrderItemReq]
+    client_id: Optional[str] = None
 
 
 class PaymentReq(BaseModel):
     payment_method: str = "cash"  # cash | card
     discount: float = 0.0
+    client_id: Optional[str] = None
+    discount_source: Optional[str] = None
 
 
 class SupplierReq(BaseModel):
@@ -292,11 +334,18 @@ class SupplierReq(BaseModel):
     phone: Optional[str] = ""
 
 
+class ClientReq(BaseModel):
+    name: str
+    phone: str
+    discount_percent: float = 0.0
+
+
 class InventoryItemReq(BaseModel):
     name: str
     measure: str = "kg"
     balance: float = 0.0
     cost: float = 0.0
+    warehouse_id: Optional[str] = None  # склад для начального остатка (по умолчанию — дефолтный)
 
 
 class InvoiceItemReq(BaseModel):
@@ -308,6 +357,7 @@ class InvoiceItemReq(BaseModel):
 
 class InvoiceReq(BaseModel):
     number: str
+    warehouse_id: Optional[str] = None  # склад прихода (по умолчанию — дефолтный)
     supplier_id: Optional[str] = None
     supplier_name: Optional[str] = ""
     items: List[InvoiceItemReq] = []
@@ -317,6 +367,14 @@ class WriteOffReq(BaseModel):
     inventory_id: str
     amount: float
     reason: str = "Списание"
+    warehouse_id: Optional[str] = None  # склад списания (по умолчанию — дефолтный)
+
+
+class StockTransferReq(BaseModel):
+    inventory_id: str
+    from_warehouse_id: str
+    to_warehouse_id: str
+    amount: float
 
 
 class PrinterReq(BaseModel):
@@ -447,6 +505,78 @@ async def list_docs(coll, query=None, sort=None, rid=None):
     return [serialize(d) for d in docs]
 
 
+# ---------------------------------------------------------------------------
+# Склад: помощники для остатков по складам и себестоимости (Задача 2)
+# ---------------------------------------------------------------------------
+async def default_warehouse_id(rid) -> Optional[str]:
+    w = (await db.warehouses.find_one({"restaurant_id": rid, "is_default": True})
+         or await db.warehouses.find_one({"restaurant_id": rid}))
+    return str(w["_id"]) if w else None
+
+
+async def warehouse_for_workshop(rid, workshop_id) -> Optional[str]:
+    if workshop_id:
+        w = await db.warehouses.find_one({"restaurant_id": rid, "workshop_id": workshop_id})
+        if w:
+            return str(w["_id"])
+    return await default_warehouse_id(rid)
+
+
+async def resolve_warehouse(rid, warehouse_id) -> str:
+    """Валидирует склад в рамках заведения; пустой -> дефолтный. 404 если чужой/несуществующий."""
+    if not warehouse_id:
+        wid = await default_warehouse_id(rid)
+        if not wid:
+            raise HTTPException(status_code=400, detail="Не настроен склад по умолчанию")
+        return wid
+    w = await db.warehouses.find_one({"_id": parse_oid(warehouse_id), "restaurant_id": rid})
+    if not w:
+        raise HTTPException(status_code=404, detail="Склад не найден")
+    return warehouse_id
+
+
+async def adjust_stock(rid, inventory_id, warehouse_id, delta):
+    """Двигает остаток на конкретном складе и синхронизирует агрегат inventory.balance."""
+    if not warehouse_id:
+        warehouse_id = await default_warehouse_id(rid)
+    await db.stock.update_one(
+        {"restaurant_id": rid, "inventory_id": inventory_id, "warehouse_id": warehouse_id},
+        {"$inc": {"quantity": delta}}, upsert=True)
+    await db.inventory.update_one(
+        {"_id": parse_oid(inventory_id), "restaurant_id": rid}, {"$inc": {"balance": delta}})
+
+
+async def get_stock_qty(rid, inventory_id, warehouse_id) -> float:
+    s = await db.stock.find_one(
+        {"restaurant_id": rid, "inventory_id": inventory_id, "warehouse_id": warehouse_id})
+    return round(s.get("quantity", 0), 4) if s else 0.0
+
+
+async def compute_product_cost(rid, recipe) -> float:
+    total = 0.0
+    for ing in (recipe or []):
+        if not ObjectId.is_valid(ing.get("inventory_id", "")):
+            continue
+        inv = await db.inventory.find_one(
+            {"_id": ObjectId(ing["inventory_id"]), "restaurant_id": rid})
+        if not inv:
+            continue
+        stock_unit = inv.get("measure", "kg")
+        per = convert_amount(ing["amount"], ing.get("unit"), stock_unit)
+        total += per * inv.get("cost", 0)
+    return round(total, 2)
+
+
+async def recompute_products_for_ingredients(rid, inventory_ids):
+    prods = await db.products.find(
+        {"restaurant_id": rid, "cost_source": "auto",
+         "recipe.inventory_id": {"$in": list(inventory_ids)}}).to_list(3000)
+    for p in prods:
+        c = await compute_product_cost(rid, p.get("recipe", []))
+        await db.products.update_one({"_id": p["_id"]}, {"$set": {"cost": c}})
+
+
+
 # ----- Restaurants (Мультитенантность) -----
 @api.get("/restaurants")
 async def get_restaurants(user: dict = Depends(get_current_user)):
@@ -524,21 +654,96 @@ async def get_products(user: dict = Depends(get_current_user)):
 
 @api.post("/products")
 async def create_product(req: ProductReq, user: dict = Depends(require_roles("manager"))):
-    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
+    rid = user["restaurant_id"]
+    doc = {**req.model_dump(), "restaurant_id": rid, "created_at": iso(now_utc())}
+    if doc.get("cost_source") == "auto":
+        doc["cost"] = await compute_product_cost(rid, doc.get("recipe", []))
     res = await db.products.insert_one(doc)
     return serialize(await db.products.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/products/{pid}")
 async def update_product(pid: str, req: ProductReq, user: dict = Depends(require_roles("manager"))):
-    await db.products.update_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]}, {"$set": req.model_dump()})
-    return serialize(await db.products.find_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]}))
+    rid = user["restaurant_id"]
+    upd = req.model_dump()
+    if upd.get("cost_source") == "auto":
+        upd["cost"] = await compute_product_cost(rid, upd.get("recipe", []))
+    await db.products.update_one({"_id": parse_oid(pid), "restaurant_id": rid}, {"$set": upd})
+    return serialize(await db.products.find_one({"_id": parse_oid(pid), "restaurant_id": rid}))
 
 
 @api.delete("/products/{pid}")
 async def delete_product(pid: str, user: dict = Depends(require_roles("manager"))):
     await db.products.delete_one({"_id": parse_oid(pid), "restaurant_id": user["restaurant_id"]})
     return {"success": True}
+
+
+# ----- Modifier groups & options (Модификаторы, Задача 3) -----
+@api.get("/modifier-groups")
+async def get_modifier_groups(user: dict = Depends(get_current_user)):
+    rid = user["restaurant_id"]
+    groups = await list_docs("modifier_groups", sort=[("name", 1)], rid=rid)
+    opts = await db.modifier_options.find({"restaurant_id": rid}).to_list(5000)
+    by_group = {}
+    for o in opts:
+        by_group.setdefault(o["group_id"], []).append(serialize(o))
+    for g in groups:
+        g["options"] = by_group.get(g["id"], [])
+    return groups
+
+
+@api.post("/modifier-groups")
+async def create_modifier_group(req: ModifierGroupReq, user: dict = Depends(require_roles("manager"))):
+    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
+    res = await db.modifier_groups.insert_one(doc)
+    return serialize(await db.modifier_groups.find_one({"_id": res.inserted_id}))
+
+
+@api.put("/modifier-groups/{gid}")
+async def update_modifier_group(gid: str, req: ModifierGroupReq, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    grp = await db.modifier_groups.find_one({"_id": parse_oid(gid), "restaurant_id": rid})
+    if not grp:
+        raise HTTPException(status_code=404, detail="Группа модификаторов не найдена")
+    await db.modifier_groups.update_one({"_id": parse_oid(gid), "restaurant_id": rid}, {"$set": req.model_dump()})
+    return serialize(await db.modifier_groups.find_one({"_id": parse_oid(gid), "restaurant_id": rid}))
+
+
+@api.delete("/modifier-groups/{gid}")
+async def delete_modifier_group(gid: str, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    await db.modifier_groups.delete_one({"_id": parse_oid(gid), "restaurant_id": rid})
+    await db.modifier_options.delete_many({"group_id": gid, "restaurant_id": rid})
+    # отвязать от блюд
+    await db.products.update_many(
+        {"restaurant_id": rid, "modifier_group_ids": gid}, {"$pull": {"modifier_group_ids": gid}})
+    return {"success": True}
+
+
+@api.post("/modifier-groups/{gid}/options")
+async def create_modifier_option(gid: str, req: ModifierOptionReq, user: dict = Depends(require_roles("manager"))):
+    grp = await db.modifier_groups.find_one({"_id": parse_oid(gid), "restaurant_id": user["restaurant_id"]})
+    if not grp:
+        raise HTTPException(status_code=404, detail="Группа модификаторов не найдена")
+    doc = {**req.model_dump(), "group_id": gid, "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
+    res = await db.modifier_options.insert_one(doc)
+    return serialize(await db.modifier_options.find_one({"_id": res.inserted_id}))
+
+
+@api.put("/modifier-groups/{gid}/options/{oid}")
+async def update_modifier_option(gid: str, oid: str, req: ModifierOptionReq, user: dict = Depends(require_roles("manager"))):
+    await db.modifier_options.update_one(
+        {"_id": parse_oid(oid), "group_id": gid, "restaurant_id": user["restaurant_id"]},
+        {"$set": req.model_dump()})
+    return serialize(await db.modifier_options.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]}))
+
+
+@api.delete("/modifier-groups/{gid}/options/{oid}")
+async def delete_modifier_option(gid: str, oid: str, user: dict = Depends(require_roles("manager"))):
+    await db.modifier_options.delete_one(
+        {"_id": parse_oid(oid), "group_id": gid, "restaurant_id": user["restaurant_id"]})
+    return {"success": True}
+
 
 
 # ----- Tables -----
@@ -714,7 +919,50 @@ async def list_shifts(user: dict = Depends(require_roles("manager"))):
 # ---------------------------------------------------------------------------
 def calc_items(items: List[dict]):
     for it in items:
-        it["total"] = round(it["price"] * it["count"], 2)
+        mods = sum(m.get("price_delta", 0) for m in it.get("selected_modifiers", []) or [])
+        it["total"] = round((it["price"] + mods) * it["count"], 2)
+    subtotal = round(sum(it["total"] for it in items), 2)
+    return items, subtotal
+
+
+async def validate_and_price_items(rid, items):
+    """Резолвит модификаторы из БД (цена/название), валидирует принадлежность блюду и min/max,
+    считает итоги. Клиентские price_delta/name НЕ доверяются."""
+    grp_cache = {}
+    for it in items:
+        pid = it.get("product_id")
+        prod = await db.products.find_one({"_id": parse_oid(pid), "restaurant_id": rid}) if ObjectId.is_valid(pid or "") else None
+        allowed = set((prod or {}).get("modifier_group_ids", []))
+        cleaned = []
+        per_group = {}
+        for m in (it.get("selected_modifiers", []) or []):
+            gid, oid = m.get("group_id"), m.get("option_id")
+            if gid not in allowed:
+                raise HTTPException(status_code=400, detail="Недопустимый модификатор для этого блюда")
+            opt = await db.modifier_options.find_one(
+                {"_id": parse_oid(oid), "group_id": gid, "restaurant_id": rid}) if ObjectId.is_valid(oid or "") else None
+            if not opt:
+                raise HTTPException(status_code=400, detail="Модификатор не найден")
+            cleaned.append({"group_id": gid, "option_id": oid,
+                            "name": opt["name"], "price_delta": opt.get("price_delta", 0)})
+            per_group[gid] = per_group.get(gid, 0) + 1
+        for gid in allowed:
+            if gid not in grp_cache:
+                grp_cache[gid] = await db.modifier_groups.find_one(
+                    {"_id": parse_oid(gid), "restaurant_id": rid})
+            grp = grp_cache[gid]
+            if not grp:
+                continue
+            cnt = per_group.get(gid, 0)
+            mx = grp.get("max_count", 1) if grp.get("selection_type") == "multiple" else 1
+            mn = grp.get("min_count", 0)
+            if cnt > mx:
+                raise HTTPException(status_code=400, detail=f"Слишком много опций в «{grp['name']}» (макс {mx})")
+            if cnt < mn:
+                raise HTTPException(status_code=400, detail=f"Нужно выбрать минимум {mn} в «{grp['name']}»")
+        it["selected_modifiers"] = cleaned
+        mods = sum(m["price_delta"] for m in cleaned)
+        it["total"] = round((it["price"] + mods) * it["count"], 2)
     subtotal = round(sum(it["total"] for it in items), 2)
     return items, subtotal
 
@@ -741,10 +989,11 @@ async def create_order(req: OrderCreateReq, user: dict = Depends(get_current_use
     if not shift:
         raise HTTPException(status_code=400, detail="Смена не открыта. Откройте смену.")
     items = [i.model_dump() for i in req.items]
-    items, subtotal = calc_items(items)
+    items, subtotal = await validate_and_price_items(user["restaurant_id"], items)
     doc = {
         "table_id": req.table_id,
         "restaurant_id": user["restaurant_id"],
+        "client_id": req.client_id,
         "waiter_id": user["id"],
         "waiter_name": user.get("name", ""),
         "items": items,
@@ -767,11 +1016,14 @@ async def update_order(oid: str, req: OrderUpdateReq, user: dict = Depends(get_c
     if o["status"] == "closed":
         raise HTTPException(status_code=400, detail="Заказ уже закрыт")
     items = [i.model_dump() for i in req.items]
-    items, subtotal = calc_items(items)
+    items, subtotal = await validate_and_price_items(user["restaurant_id"], items)
     total = round(subtotal - o.get("discount", 0), 2)
+    upd = {"items": items, "subtotal": subtotal, "total": total}
+    if req.client_id is not None:
+        upd["client_id"] = req.client_id
     await db.orders.update_one(
         {"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]},
-        {"$set": {"items": items, "subtotal": subtotal, "total": total}},
+        {"$set": upd},
     )
     return serialize(await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]}))
 
@@ -816,11 +1068,28 @@ async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_role
     if o["status"] == "closed":
         raise HTTPException(status_code=400, detail="Заказ уже оплачен")
     total = round(o["subtotal"] - req.discount, 2)
+    subtotal = o.get("subtotal", 0) or 0
+    discount_percent = round(req.discount / subtotal * 100, 2) if subtotal else 0.0
+    client_id = req.client_id or o.get("client_id")
+    client_name = ""
+    discount_source = req.discount_source
+    if client_id:
+        cl = await db.clients.find_one({"_id": parse_oid(client_id), "restaurant_id": user["restaurant_id"]})
+        if cl:
+            client_name = cl.get("name", "")
+            if not discount_source and req.discount > 0:
+                discount_source = f"client:{client_name}"
+    if not discount_source and req.discount > 0:
+        discount_source = "manual"
     await db.orders.update_one(
         {"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]},
         {"$set": {
             "status": "closed",
             "discount": req.discount,
+            "discount_percent": discount_percent,
+            "discount_source": discount_source,
+            "client_id": client_id,
+            "client_name": client_name,
             "total": total,
             "payment_method": req.payment_method,
             "cashier_id": user["id"],
@@ -828,30 +1097,51 @@ async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_role
             "closed_at": iso(now_utc()),
         }},
     )
-    # auto write-off ingredients by recipe (тех.карты)
+    # auto write-off ingredients by recipe (тех.карты) — со склада цеха блюда
+    rid = user["restaurant_id"]
     for it in o["items"]:
         pid = it.get("product_id", "")
         if not ObjectId.is_valid(pid):
             continue
-        prod = await db.products.find_one({"_id": ObjectId(pid), "restaurant_id": user["restaurant_id"]})
+        prod = await db.products.find_one({"_id": ObjectId(pid), "restaurant_id": rid})
         if not prod:
             continue
+        wh_id = await warehouse_for_workshop(rid, prod.get("workshop_id"))
         for ing in prod.get("recipe", []):
             if not ObjectId.is_valid(ing["inventory_id"]):
                 continue
-            inv = await db.inventory.find_one({"_id": ObjectId(ing["inventory_id"]), "restaurant_id": user["restaurant_id"]})
+            inv = await db.inventory.find_one({"_id": ObjectId(ing["inventory_id"]), "restaurant_id": rid})
             stock_unit = inv.get("measure", "kg") if inv else "kg"
             per_portion = convert_amount(ing["amount"], ing.get("unit"), stock_unit)
             amt = round(per_portion * it["count"], 4)
             if amt <= 0:
                 continue
-            await db.inventory.update_one(
-                {"_id": ObjectId(ing["inventory_id"])}, {"$inc": {"balance": -amt}}
-            )
+            await adjust_stock(rid, ing["inventory_id"], wh_id, -amt)
             await db.writeoffs.insert_one({
                 "inventory_id": ing["inventory_id"], "name": ing["name"], "amount": amt,
-                "restaurant_id": user["restaurant_id"],
+                "restaurant_id": rid, "warehouse_id": wh_id, "kind": "sale",
                 "reason": f"Продажа: {it['name']}", "created_by": user.get("name", ""),
+                "created_at": iso(now_utc()),
+            })
+        # списание ингредиентов модификаторов
+        for m in it.get("selected_modifiers", []) or []:
+            if not ObjectId.is_valid(m.get("option_id", "")):
+                continue
+            opt = await db.modifier_options.find_one(
+                {"_id": ObjectId(m["option_id"]), "restaurant_id": rid})
+            if not opt or not opt.get("inventory_id") or not opt.get("amount"):
+                continue
+            inv = await db.inventory.find_one({"_id": ObjectId(opt["inventory_id"]), "restaurant_id": rid}) if ObjectId.is_valid(opt["inventory_id"]) else None
+            stock_unit = inv.get("measure", "kg") if inv else "kg"
+            per = convert_amount(opt["amount"], None, stock_unit)
+            amt = round(per * it["count"], 4)
+            if amt <= 0:
+                continue
+            await adjust_stock(rid, opt["inventory_id"], wh_id, -amt)
+            await db.writeoffs.insert_one({
+                "inventory_id": opt["inventory_id"], "name": f"{opt['name']} (модификатор)", "amount": amt,
+                "restaurant_id": rid, "warehouse_id": wh_id, "kind": "sale",
+                "reason": f"Модификатор: {it['name']}", "created_by": user.get("name", ""),
                 "created_at": iso(now_utc()),
             })
     return serialize(await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]}))
@@ -868,27 +1158,119 @@ async def delete_order(oid: str, user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 # INVENTORY / WAREHOUSE (Склад)
 # ---------------------------------------------------------------------------
+@api.get("/warehouses")
+async def get_warehouses(user: dict = Depends(get_current_user)):
+    return await list_docs("warehouses", sort=[("name", 1)], rid=user["restaurant_id"])
+
+
+@api.post("/warehouses")
+async def create_warehouse(req: WarehouseReq, user: dict = Depends(require_roles("manager"))):
+    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"],
+           "is_default": False, "created_at": iso(now_utc())}
+    res = await db.warehouses.insert_one(doc)
+    return serialize(await db.warehouses.find_one({"_id": res.inserted_id}))
+
+
+@api.put("/warehouses/{whid}")
+async def update_warehouse(whid: str, req: WarehouseReq, user: dict = Depends(require_roles("manager"))):
+    await db.warehouses.update_one(
+        {"_id": parse_oid(whid), "restaurant_id": user["restaurant_id"]}, {"$set": req.model_dump()})
+    return serialize(await db.warehouses.find_one({"_id": parse_oid(whid), "restaurant_id": user["restaurant_id"]}))
+
+
+@api.delete("/warehouses/{whid}")
+async def delete_warehouse(whid: str, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    wh = await db.warehouses.find_one({"_id": parse_oid(whid), "restaurant_id": rid})
+    if not wh:
+        raise HTTPException(status_code=404, detail="Склад не найден")
+    if wh.get("is_default"):
+        raise HTTPException(status_code=400, detail="Нельзя удалить склад по умолчанию")
+    # синхронизируем агрегат inventory.balance: снимаем остатки удаляемого склада
+    async for s in db.stock.find({"warehouse_id": whid, "restaurant_id": rid}):
+        q = s.get("quantity", 0) or 0
+        if q:
+            await db.inventory.update_one(
+                {"_id": parse_oid(s["inventory_id"]), "restaurant_id": rid}, {"$inc": {"balance": -q}})
+    await db.stock.delete_many({"warehouse_id": whid, "restaurant_id": rid})
+    await db.warehouses.delete_one({"_id": parse_oid(whid), "restaurant_id": rid})
+    return {"success": True}
+
+
+@api.post("/stock/transfer")
+async def transfer_stock(req: StockTransferReq, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="Количество должно быть больше нуля")
+    if req.from_warehouse_id == req.to_warehouse_id:
+        raise HTTPException(status_code=400, detail="Склады должны отличаться")
+    from_wh = await resolve_warehouse(rid, req.from_warehouse_id)
+    to_wh = await resolve_warehouse(rid, req.to_warehouse_id)
+    have = await get_stock_qty(rid, req.inventory_id, from_wh)
+    if req.amount > have:
+        raise HTTPException(status_code=400, detail=f"Недостаточно остатка на складе-источнике (есть {have})")
+    inv = await db.inventory.find_one({"_id": parse_oid(req.inventory_id), "restaurant_id": rid})
+    # перемещение не меняет общий balance: -delta на from, +delta на to
+    await db.stock.update_one(
+        {"restaurant_id": rid, "inventory_id": req.inventory_id, "warehouse_id": from_wh},
+        {"$inc": {"quantity": -req.amount}}, upsert=True)
+    await db.stock.update_one(
+        {"restaurant_id": rid, "inventory_id": req.inventory_id, "warehouse_id": to_wh},
+        {"$inc": {"quantity": req.amount}}, upsert=True)
+    await db.writeoffs.insert_one({
+        "inventory_id": req.inventory_id, "restaurant_id": rid,
+        "name": inv["name"] if inv else "", "amount": req.amount,
+        "warehouse_id": from_wh, "to_warehouse_id": to_wh,
+        "reason": "Перемещение между складами", "kind": "transfer",
+        "created_by": user.get("name", ""), "created_at": iso(now_utc()),
+    })
+    return {"success": True}
+
+
 @api.get("/inventory")
 async def get_inventory(user: dict = Depends(get_current_user)):
-    return await list_docs("inventory", sort=[("name", 1)], rid=user["restaurant_id"])
+    rid = user["restaurant_id"]
+    items = await list_docs("inventory", sort=[("name", 1)], rid=rid)
+    warehouses = {w["id"]: w["name"] for w in await list_docs("warehouses", rid=rid)}
+    stock_docs = await db.stock.find({"restaurant_id": rid}).to_list(20000)
+    by_inv = {}
+    for s in stock_docs:
+        by_inv.setdefault(s["inventory_id"], []).append(
+            {"warehouse_id": s["warehouse_id"],
+             "warehouse_name": warehouses.get(s["warehouse_id"], "—"),
+             "quantity": round(s.get("quantity", 0), 4)})
+    for it in items:
+        it["stocks"] = by_inv.get(it["id"], [])
+    return items
 
 
 @api.post("/inventory")
 async def create_inventory(req: InventoryItemReq, user: dict = Depends(require_roles("manager"))):
-    doc = {**req.model_dump(), "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
+    rid = user["restaurant_id"]
+    doc = {"name": req.name, "measure": req.measure, "cost": req.cost,
+           "balance": 0.0, "restaurant_id": rid, "created_at": iso(now_utc())}
     res = await db.inventory.insert_one(doc)
+    iid = str(res.inserted_id)
+    if req.balance:
+        wh = await resolve_warehouse(rid, req.warehouse_id)
+        await adjust_stock(rid, iid, wh, req.balance)
     return serialize(await db.inventory.find_one({"_id": res.inserted_id}))
 
 
 @api.put("/inventory/{iid}")
 async def update_inventory(iid: str, req: InventoryItemReq, user: dict = Depends(require_roles("manager"))):
-    await db.inventory.update_one({"_id": parse_oid(iid), "restaurant_id": user["restaurant_id"]}, {"$set": req.model_dump()})
-    return serialize(await db.inventory.find_one({"_id": parse_oid(iid), "restaurant_id": user["restaurant_id"]}))
+    rid = user["restaurant_id"]
+    await db.inventory.update_one(
+        {"_id": parse_oid(iid), "restaurant_id": rid},
+        {"$set": {"name": req.name, "measure": req.measure, "cost": req.cost}})
+    await recompute_products_for_ingredients(rid, [iid])
+    return serialize(await db.inventory.find_one({"_id": parse_oid(iid), "restaurant_id": rid}))
 
 
 @api.delete("/inventory/{iid}")
 async def delete_inventory(iid: str, user: dict = Depends(require_roles("manager"))):
     await db.inventory.delete_one({"_id": parse_oid(iid), "restaurant_id": user["restaurant_id"]})
+    await db.stock.delete_many({"inventory_id": iid, "restaurant_id": user["restaurant_id"]})
     return {"success": True}
 
 
@@ -910,6 +1292,55 @@ async def delete_supplier(sid: str, user: dict = Depends(require_roles("manager"
     return {"success": True}
 
 
+# ----- Clients (Клиенты и скидки, Задача 4) -----
+@api.get("/clients")
+async def get_clients(phone: Optional[str] = None, user: dict = Depends(get_current_user)):
+    rid = user["restaurant_id"]
+    if phone:
+        digits = "".join(ch for ch in phone if ch.isdigit())
+        cl = None
+        if len(digits) >= 7:
+            cl = await db.clients.find_one(
+                {"restaurant_id": rid, "phone_digits": {"$regex": re.escape(digits) + "$"}})
+        if not cl:
+            raise HTTPException(status_code=404, detail="Клиент не найден")
+        return serialize(cl)
+    return await list_docs("clients", sort=[("name", 1)], rid=rid)
+
+
+@api.post("/clients")
+async def create_client(req: ClientReq, user: dict = Depends(get_current_user)):
+    rid = user["restaurant_id"]
+    digits = "".join(ch for ch in req.phone if ch.isdigit())
+    if await db.clients.find_one({"restaurant_id": rid, "phone_digits": digits}):
+        raise HTTPException(status_code=400, detail="Клиент с таким телефоном уже существует")
+    doc = {**req.model_dump(), "phone_digits": digits, "restaurant_id": rid, "created_at": iso(now_utc())}
+    res = await db.clients.insert_one(doc)
+    return serialize(await db.clients.find_one({"_id": res.inserted_id}))
+
+
+@api.put("/clients/{cid}")
+async def update_client(cid: str, req: ClientReq, user: dict = Depends(get_current_user)):
+    rid = user["restaurant_id"]
+    digits = "".join(ch for ch in req.phone if ch.isdigit())
+    dup = await db.clients.find_one({"restaurant_id": rid, "phone_digits": digits})
+    if dup and str(dup["_id"]) != cid:
+        raise HTTPException(status_code=400, detail="Клиент с таким телефоном уже существует")
+    await db.clients.update_one(
+        {"_id": parse_oid(cid), "restaurant_id": rid},
+        {"$set": {**req.model_dump(), "phone_digits": digits}})
+    return serialize(await db.clients.find_one({"_id": parse_oid(cid), "restaurant_id": rid}))
+
+
+@api.delete("/clients/{cid}")
+async def delete_client(cid: str, user: dict = Depends(require_roles("manager"))):
+    res = await db.clients.delete_one({"_id": parse_oid(cid), "restaurant_id": user["restaurant_id"]})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+    return {"success": True}
+
+
+
 @api.get("/invoices")
 async def get_invoices(user: dict = Depends(get_current_user)):
     return await list_docs("invoices", sort=[("created_at", -1)], rid=user["restaurant_id"])
@@ -917,13 +1348,16 @@ async def get_invoices(user: dict = Depends(get_current_user)):
 
 @api.post("/invoices")
 async def create_invoice(req: InvoiceReq, user: dict = Depends(require_roles("manager"))):
-    if await db.invoices.find_one({"number": req.number, "restaurant_id": user["restaurant_id"]}):
+    rid = user["restaurant_id"]
+    if await db.invoices.find_one({"number": req.number, "restaurant_id": rid}):
         raise HTTPException(status_code=400, detail="Накладная с таким номером уже существует")
+    warehouse_id = await resolve_warehouse(rid, req.warehouse_id)
     items = [i.model_dump() for i in req.items]
     total = round(sum(i["amount"] * i["price"] for i in items), 2)
     doc = {
         "number": req.number,
-        "restaurant_id": user["restaurant_id"],
+        "restaurant_id": rid,
+        "warehouse_id": warehouse_id,
         "supplier_id": req.supplier_id,
         "supplier_name": req.supplier_name,
         "items": items,
@@ -932,12 +1366,16 @@ async def create_invoice(req: InvoiceReq, user: dict = Depends(require_roles("ma
         "created_at": iso(now_utc()),
     }
     res = await db.invoices.insert_one(doc)
-    # increase stock balances
+    # приход: увеличиваем остаток на складе накладной + обновляем себестоимость ингредиента
+    touched = set()
     for it in items:
+        await adjust_stock(rid, it["inventory_id"], warehouse_id, it["amount"])
         await db.inventory.update_one(
-            {"_id": parse_oid(it["inventory_id"])},
-            {"$inc": {"balance": it["amount"]}, "$set": {"cost": it["price"]}},
-        )
+            {"_id": parse_oid(it["inventory_id"]), "restaurant_id": rid},
+            {"$set": {"cost": it["price"]}})
+        touched.add(it["inventory_id"])
+    # пересчёт себестоимости блюд с cost_source=auto, использующих эти ингредиенты
+    await recompute_products_for_ingredients(rid, touched)
     return serialize(await db.invoices.find_one({"_id": res.inserted_id}))
 
 
@@ -948,26 +1386,29 @@ async def get_writeoffs(user: dict = Depends(get_current_user)):
 
 @api.post("/writeoffs")
 async def create_writeoff(req: WriteOffReq, user: dict = Depends(require_roles("manager"))):
-    inv = await db.inventory.find_one({"_id": parse_oid(req.inventory_id), "restaurant_id": user["restaurant_id"]})
+    rid = user["restaurant_id"]
+    inv = await db.inventory.find_one({"_id": parse_oid(req.inventory_id), "restaurant_id": rid})
     if not inv:
         raise HTTPException(status_code=404, detail="Позиция склада не найдена")
     if req.amount <= 0:
         raise HTTPException(status_code=400, detail="Количество должно быть больше нуля")
-    if req.amount > inv.get("balance", 0):
-        raise HTTPException(status_code=400, detail=f"Недостаточно остатка (есть {inv.get('balance', 0)})")
+    warehouse_id = await resolve_warehouse(rid, req.warehouse_id)
+    have = await get_stock_qty(rid, req.inventory_id, warehouse_id)
+    if req.amount > have:
+        raise HTTPException(status_code=400, detail=f"Недостаточно остатка на складе (есть {have})")
     doc = {
         "inventory_id": req.inventory_id,
-        "restaurant_id": user["restaurant_id"],
+        "restaurant_id": rid,
+        "warehouse_id": warehouse_id,
         "name": inv["name"],
         "amount": req.amount,
         "reason": req.reason,
+        "kind": "manual",
         "created_by": user.get("name", ""),
         "created_at": iso(now_utc()),
     }
     res = await db.writeoffs.insert_one(doc)
-    await db.inventory.update_one(
-        {"_id": parse_oid(req.inventory_id)}, {"$inc": {"balance": -req.amount}}
-    )
+    await adjust_stock(rid, req.inventory_id, warehouse_id, -req.amount)
     return serialize(await db.writeoffs.find_one({"_id": res.inserted_id}))
 
 
@@ -1016,12 +1457,36 @@ async def dashboard(user: dict = Depends(require_roles("manager"))):
 
 @api.get("/reports/sales")
 async def sales_report(start: Optional[str] = None, end: Optional[str] = None,
+                       group_by: Optional[str] = None,
                        user: dict = Depends(require_roles("manager"))):
-    closed = await db.orders.find({"status": "closed", "restaurant_id": user["restaurant_id"]}).to_list(10000)
+    rid = user["restaurant_id"]
+    closed = await db.orders.find({"status": "closed", "restaurant_id": rid}).to_list(10000)
     if start:
         closed = [o for o in closed if (o.get("closed_at") or "")[:10] >= start]
     if end:
         closed = [o for o in closed if (o.get("closed_at") or "")[:10] <= end]
+
+    if group_by == "client":
+        clients = {str(c["_id"]): c for c in await db.clients.find({"restaurant_id": rid}).to_list(5000)}
+        cmap = {}
+        for o in closed:
+            cid = o.get("client_id")
+            if not cid:
+                continue
+            cl = clients.get(cid)
+            name = (cl or {}).get("name") or o.get("client_name") or "—"
+            row = cmap.setdefault(cid, {"client_id": cid, "client_name": name,
+                                        "order_count": 0, "total_revenue": 0.0, "total_discount": 0.0})
+            row["order_count"] += 1
+            row["total_revenue"] += o.get("total", 0)
+            row["total_discount"] += o.get("discount", 0)
+        rows = sorted(cmap.values(), key=lambda x: x["total_revenue"], reverse=True)
+        for r in rows:
+            r["total_revenue"] = round(r["total_revenue"], 2)
+            r["total_discount"] = round(r["total_discount"], 2)
+        return {"rows": rows,
+                "total_revenue": round(sum(r["total_revenue"] for r in rows), 2),
+                "total_discount": round(sum(r["total_discount"] for r in rows), 2)}
 
     total = round(sum(o.get("total", 0) for o in closed), 2)
     cash = round(sum(o.get("total", 0) for o in closed if o.get("payment_method") == "cash"), 2)
@@ -1196,6 +1661,86 @@ async def report_abc(start: Optional[str] = None, end: Optional[str] = None,
             "total": round(sum(r["revenue"] for r in rows), 2)}
 
 
+@api.get("/reports/inventory")
+async def report_inventory(warehouse_id: Optional[str] = None,
+                           user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    inv = {str(i["_id"]): i for i in await db.inventory.find({"restaurant_id": rid}).to_list(3000)}
+    warehouses = {w["id"]: w["name"] for w in await list_docs("warehouses", rid=rid)}
+    q = {"restaurant_id": rid}
+    if warehouse_id:
+        q["warehouse_id"] = warehouse_id
+    stock_docs = await db.stock.find(q).to_list(20000)
+    rows = []
+    for s in stock_docs:
+        item = inv.get(s["inventory_id"])
+        if not item:
+            continue
+        qty = round(s.get("quantity", 0), 4)
+        cost = item.get("cost", 0)
+        rows.append({
+            "inventory_id": s["inventory_id"], "name": item["name"],
+            "measure": item.get("measure", ""),
+            "warehouse_id": s["warehouse_id"],
+            "warehouse_name": warehouses.get(s["warehouse_id"], "—"),
+            "quantity": qty, "cost": cost, "value": round(qty * cost, 2),
+        })
+    rows.sort(key=lambda r: (r["warehouse_name"], r["name"]))
+    return {"rows": rows, "total_value": round(sum(r["value"] for r in rows), 2),
+            "warehouses": [{"id": k, "name": v} for k, v in warehouses.items()]}
+
+
+@api.get("/reports/stock-movement")
+async def report_stock_movement(warehouse_id: Optional[str] = None,
+                                start: Optional[str] = None, end: Optional[str] = None,
+                                user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    inv_names = {str(i["_id"]): i["name"] for i in await db.inventory.find({"restaurant_id": rid}).to_list(3000)}
+
+    def in_range(ts):
+        d = (ts or "")[:10]
+        if start and d < start:
+            return False
+        if end and d > end:
+            return False
+        return True
+
+    # Приход из накладных (позиции склада прихода)
+    inflow = {}
+    invoices = await db.invoices.find({"restaurant_id": rid}).to_list(20000)
+    for inv in invoices:
+        if not in_range(inv.get("created_at")):
+            continue
+        if warehouse_id and inv.get("warehouse_id") != warehouse_id:
+            continue
+        for it in inv.get("items", []):
+            a = inflow.setdefault(it["inventory_id"], {"name": it["name"], "in": 0.0, "out": 0.0})
+            a["in"] += it["amount"]
+
+    # Расход из списаний (ручные + продажи), исключая перемещения
+    for wo in await db.writeoffs.find({"restaurant_id": rid}).to_list(50000):
+        if not in_range(wo.get("created_at")):
+            continue
+        if wo.get("kind") == "transfer":
+            continue
+        if warehouse_id and wo.get("warehouse_id") != warehouse_id:
+            continue
+        a = inflow.setdefault(wo["inventory_id"], {"name": wo.get("name", ""), "in": 0.0, "out": 0.0})
+        a["out"] += wo.get("amount", 0)
+
+    rows = []
+    for iid, a in inflow.items():
+        rows.append({"inventory_id": iid, "name": inv_names.get(iid, a["name"]),
+                     "in_qty": round(a["in"], 4), "out_qty": round(a["out"], 4),
+                     "net": round(a["in"] - a["out"], 4)})
+    rows.sort(key=lambda r: r["name"])
+    warehouses = {w["id"]: w["name"] for w in await list_docs("warehouses", rid=rid)}
+    return {"rows": rows,
+            "warehouses": [{"id": k, "name": v} for k, v in warehouses.items()]}
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1265,6 +1810,10 @@ def build_lines(kind: str, table_name: str, waiter: str, items: List[dict], subt
             lines.append(_pad(f"{it['name']} x{_fmt_count(it['count'])}", f"{total:.2f}"))
         else:
             lines.append(f"{it['name']} x{_fmt_count(it['count'])}")
+        for m in it.get("selected_modifiers", []) or []:
+            d = m.get("price_delta", 0)
+            suffix = f" (+{d:.2f})" if d else ""
+            lines.append(f"  + {m.get('name', '')}{suffix}")
     if kind == "precheck" and subtotal is not None:
         lines.append("-" * 32)
         lines.append(_pad("ИТОГО:", f"{subtotal:.2f}"))
@@ -1760,6 +2309,8 @@ app.add_middleware(
 @app.on_event("startup")
 async def seed():
     await db.users.create_index("pin", sparse=True)
+    await db.stock.create_index(
+        [("restaurant_id", 1), ("inventory_id", 1), ("warehouse_id", 1)], unique=True)
 
     # --- Мультитенантность: дефолтное заведение (restaurant_id) ---
     global _default_rid_cache
@@ -1915,6 +2466,55 @@ async def seed():
             recipe = [{"inventory_id": inv[n], "name": n, "amount": a} for n, a in ings if n in inv]
             if recipe:
                 await db.products.update_one({"name": pname}, {"$set": {"recipe": recipe}})
+
+    # --- Задача 2: склады + миграция остатков на дефолтный склад ---
+    if await db.warehouses.count_documents({"restaurant_id": default_rid}) == 0:
+        ws = {w["name"]: w["id"] for w in await list_docs("workshops", rid=default_rid)}
+        wk = await db.warehouses.insert_one({
+            "name": "Склад Кухня", "workshop_id": ws.get("Кухня"), "is_default": True,
+            "restaurant_id": default_rid, "created_at": iso(now_utc())})
+        await db.warehouses.insert_one({
+            "name": "Склад Бар", "workshop_id": ws.get("Бар"), "is_default": False,
+            "restaurant_id": default_rid, "created_at": iso(now_utc())})
+        default_wh = str(wk.inserted_id)
+        # перенос текущих остатков inventory.balance на дефолтный склад
+        async for it in db.inventory.find({"restaurant_id": default_rid}):
+            bal = it.get("balance", 0) or 0
+            existing = await db.stock.find_one(
+                {"restaurant_id": default_rid, "inventory_id": str(it["_id"])})
+            if not existing and bal:
+                await db.stock.insert_one({
+                    "restaurant_id": default_rid, "inventory_id": str(it["_id"]),
+                    "warehouse_id": default_wh, "quantity": bal})
+
+    # cost_source по умолчанию для существующих блюд
+    await db.products.update_many(
+        {"cost_source": {"$exists": False}}, {"$set": {"cost_source": "manual"}})
+
+    # --- Задача 3/4: демо-модификаторы и демо-клиент (идемпотентно) ---
+    if await db.modifier_groups.count_documents({"restaurant_id": default_rid}) == 0:
+        cheese = await db.inventory.find_one({"restaurant_id": default_rid, "name": "Сыр"})
+        g = await db.modifier_groups.insert_one({
+            "name": "Добавки", "selection_type": "multiple", "min_count": 0, "max_count": 3,
+            "restaurant_id": default_rid, "created_at": iso(now_utc())})
+        gid = str(g.inserted_id)
+        opts = [
+            {"name": "Доп. сыр", "price_delta": 1.5,
+             "inventory_id": str(cheese["_id"]) if cheese else None, "amount": 0.02 if cheese else None},
+            {"name": "Бекон", "price_delta": 2.0, "inventory_id": None, "amount": None},
+            {"name": "Без лука", "price_delta": 0.0, "inventory_id": None, "amount": None},
+        ]
+        for o in opts:
+            await db.modifier_options.insert_one({**o, "group_id": gid, "restaurant_id": default_rid, "created_at": iso(now_utc())})
+        await db.products.update_many(
+            {"restaurant_id": default_rid, "name": {"$in": ["Классический бургер", "Чизбургер", "Двойной бургер"]}},
+            {"$set": {"modifier_group_ids": [gid]}})
+
+    if await db.clients.count_documents({"restaurant_id": default_rid}) == 0:
+        await db.clients.insert_one({
+            "name": "Иван Петров", "phone": "+7 900 123-45-67", "phone_digits": "79001234567",
+            "discount_percent": 10.0, "restaurant_id": default_rid, "created_at": iso(now_utc())})
+
 
     # Мультитенантность: бэкфилл restaurant_id на все существующие/сид-документы, где его нет
     tenant_collections = ["users", "workshops", "categories", "products", "tables",

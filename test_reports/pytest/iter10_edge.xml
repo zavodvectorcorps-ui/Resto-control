@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" skipped="0" tests="3" time="4.167" timestamp="2026-08-26T21:55:35.973155+00:00" hostname="agent-env-82924de2-3f48-4dd4-a3a2-1224a74ea585"><testcase classname="tests.test_warehouse_edge_iter10.TestWarehouseDeletionIntegrity" name="test_delete_warehouse_with_stock_keeps_balance_consistent" time="1.541"><failure message="AssertionError: balance=5.0 but sum(stocks)=0 after deleting a warehouse that still held 5 kg&#10;assert 5.0 == 0&#10; +  where 0 = sum_stocks({'name': 'TEST_DELITEM_215536', 'measure': 'kg', 'cost': 10.0, 'balance': 5.0, ...})">self = &lt;test_warehouse_edge_iter10.TestWarehouseDeletionIntegrity object at 0xf9355e804550&gt;
+admin = &lt;requests.sessions.Session object at 0xf9355e806450&gt;
+
+    def test_delete_warehouse_with_stock_keeps_balance_consistent(self, admin):
+        wh = admin.post(f"{API}/warehouses", json={"name": f"TEST_DEL_{TS}"}, timeout=30).json()
+        it = admin.post(f"{API}/inventory", json={
+            "name": f"TEST_DELITEM_{TS}", "measure": "kg", "cost": 10,
+            "balance": 5, "warehouse_id": wh["id"]}, timeout=30).json()
+        iid = it["id"]
+        before = inv_of(admin, iid)
+        assert before["balance"] == 5 and sum_stocks(before) == 5
+    
+        assert admin.delete(f"{API}/warehouses/{wh['id']}", timeout=30).status_code == 200
+        after = inv_of(admin, iid)
+        try:
+&gt;           assert after["balance"] == sum_stocks(after), (
+                f"balance={after['balance']} but sum(stocks)={sum_stocks(after)} "
+                "after deleting a warehouse that still held 5 kg")
+E               AssertionError: balance=5.0 but sum(stocks)=0 after deleting a warehouse that still held 5 kg
+E               assert 5.0 == 0
+E                +  where 0 = sum_stocks({'name': 'TEST_DELITEM_215536', 'measure': 'kg', 'cost': 10.0, 'balance': 5.0, ...})
+
+tests/test_warehouse_edge_iter10.py:36: AssertionError</failure></testcase><testcase classname="tests.test_warehouse_edge_iter10.TestInventoryUpdateBalance" name="test_put_inventory_balance_is_ignored" time="1.241" /><testcase classname="tests.test_warehouse_edge_iter10.TestSaleGoesNegative" name="test_sale_can_drive_warehouse_stock_negative" time="2.056"><failure message="AssertionError: sale drove Склад Кухня stock negative: -1.0 (no stock guard / no warning on pay)&#10;assert -1.0 &gt;= 0">self = &lt;test_warehouse_edge_iter10.TestSaleGoesNegative object at 0xf9355d720f90&gt;
+admin = &lt;requests.sessions.Session object at 0xf9355e806450&gt;
+waiter = &lt;requests.sessions.Session object at 0xf9355d6cc590&gt;
+cashier = &lt;requests.sessions.Session object at 0xf9355d6cc450&gt;
+
+    def test_sale_can_drive_warehouse_stock_negative(self, admin, waiter, cashier):
+        whs = admin.get(f"{API}/warehouses", timeout=30).json()
+        kitchen = next(w for w in whs if w["name"] == "Склад Кухня")
+        cats = admin.get(f"{API}/categories", timeout=30).json()
+        ws = admin.get(f"{API}/workshops", timeout=30).json()
+        kws = next(w for w in ws if w["name"] == "Кухня")
+        ing = admin.post(f"{API}/inventory", json={
+            "name": f"TEST_NEG_{TS}", "measure": "kg", "cost": 10, "balance": 0}, timeout=30).json()
+        prod = admin.post(f"{API}/products", json={
+            "name": f"TEST_NEG_PROD_{TS}", "category_id": cats[0]["id"], "price": 10,
+            "cost": 0, "cost_source": "manual", "workshop_id": kws["id"],
+            "recipe": [{"inventory_id": ing["id"], "name": ing["name"],
+                        "amount": 1, "unit": "kg"}]}, timeout=30).json()
+        try:
+            cashier.post(f"{API}/shifts/open", timeout=30)
+            tables = admin.get(f"{API}/tables", timeout=30).json()
+            t = next((x for x in tables if not x.get("open_orders")), tables[0])
+            o = waiter.post(f"{API}/orders", json={
+                "table_id": t["id"],
+                "items": [{"product_id": prod["id"], "name": prod["name"],
+                           "price": 10, "count": 1}]}, timeout=30)
+            assert o.status_code == 200, o.text
+            p = cashier.post(f"{API}/orders/{o.json()['id']}/pay",
+                             json={"payment_method": "cash", "discount": 0}, timeout=30)
+            assert p.status_code == 200, p.text
+            after = inv_of(admin, ing["id"])
+            neg = next((s for s in after["stocks"] if s["warehouse_id"] == kitchen["id"]), None)
+            assert neg is not None
+&gt;           assert neg["quantity"] &gt;= 0, (
+                f"sale drove {kitchen['name']} stock negative: {neg['quantity']} "
+                "(no stock guard / no warning on pay)")
+E               AssertionError: sale drove Склад Кухня stock negative: -1.0 (no stock guard / no warning on pay)
+E               assert -1.0 &gt;= 0
+
+tests/test_warehouse_edge_iter10.py:94: AssertionError</failure></testcase></testsuite></testsuites>

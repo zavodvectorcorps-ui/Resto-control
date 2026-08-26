@@ -1,0 +1,63 @@
+{
+  "summary": "Iteration 10 — full test of Task 2 MULTI-WAREHOUSE (мультисклад) + auto dish cost + /reports/stock-movement. New suite /app/backend/tests/test_warehouse_iter10.py (19 tests, ALL PASS): warehouse seeding (Склад Кухня is_default + Кухня workshop, Склад Бар + Бар workshop), warehouse CRUD via API (create/update keeps is_default=false, delete, default-delete -> 400 'Нельзя удалить склад по умолчанию', PIN-admin -> 403), GET /inventory stocks[] with warehouse_name and balance == sum(stocks) for every item, invoice with warehouse_id increases ONLY that warehouse + updates ingredient cost + duplicate number -> 400, writeoff per warehouse (decrement + over-writeoff and wrong-warehouse -> 400 'Недостаточно остатка', amount 0 -> 400), stock/transfer (source -, dest +, aggregate unchanged, transfer logged as kind=transfer with to_warehouse_id; insufficient/same-warehouse/zero -> 400 and no stock change; non-manager -> 403), automatic cost (auto from recipe with g->kg and ml->l conversion = 40.00, recompute to 60.00 after an invoice changed an ingredient price, manual keeps 123.45 and is NOT touched by invoices, switching back to auto recomputes), sale auto-write-off on POST /orders/{id}/pay decrements the KITCHEN warehouse of the dish's workshop (bar warehouse untouched, writeoff logged with kind=sale + kitchen warehouse_id), /reports/inventory (value=qty*cost, total_value, warehouses list, warehouse_id filter) and /reports/stock-movement (in_qty=6, out_qty=2, net=4, transfers excluded, warehouse filter isolates movements, empty date range -> []). Full regression: 173 passed / 1 skipped / 2 xfail / 1 xpass (0 failures). Frontend (manager admin@resto.com): /admin/inventory all 4 tabs + 4 action buttons + warehouse filter work; warehouse create/edit via UI; invoice/transfer/writeoff modals with warehouse selectors all post correctly and per-warehouse breakdown updates live; over-transfer shows the backend error toast 'Недостаточно остатка на складе-источнике (есть 3.0)'; Движения shows transfers as 'Склад А → Склад Б'; Menu cost-source toggle switches АВТО/ВРУЧНУЮ and disables the cost input, saving a recipe in АВТО produced cost 0.90 ₽ (3 шт Булочки x 0.30); Reports 'Склад' tab renders both tables with a working warehouse filter. Zero console/page errors anywhere. Found 3 real backend defects (2 proven by /app/backend/tests/test_warehouse_edge_iter10.py, 1 by a manual probe).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "DELETE /api/warehouses/{id}", "issue": "Deleting a warehouse that still holds stock deletes the stock rows but does NOT decrement inventory.balance -> permanent desync (proven: item with 5 kg on the deleted warehouse ends with balance=5.0 while sum(stocks)=0, i.e. phantom stock in every balance-based screen/report). Fix: subtract each deleted stock row's quantity from inventory.balance (or block deletion while stock != 0 with a 400).", "priority": "HIGH"},
+      {"endpoint": "POST /api/stock/transfer, POST /api/invoices, POST /api/writeoffs, POST /api/inventory", "issue": "warehouse_id / from_warehouse_id / to_warehouse_id are never validated to exist or to belong to the caller's restaurant. Proven: transfer + invoice to warehouse_id='ffffffffffffffffffffffff' both return 200 and create stock rows shown in the UI as warehouse '—'; a write-off on that bogus id also succeeded (200). This also allows pushing stock into another tenant's warehouse id. Fix: look up each warehouse with {'_id':..., 'restaurant_id': rid} and 404/400 on miss.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/orders/{id}/pay", "issue": "Sale auto-write-off has no stock guard: paying an order for a dish whose ingredient has 0 on the workshop warehouse drives that warehouse's quantity negative (-1.0 proven) with no warning/flag returned. Acceptable for a POS, but the negative should at least be surfaced (report/UI flag) or clamped deliberately."},
+      {"endpoint": "GET /api/reports/stock-movement", "issue": "Row 'name' for inflow comes from the invoice item payload (client-supplied, possibly stale) instead of the current inventory document, so the report showed rows named 'TEST' while the item is named differently. Resolve names from db.inventory by inventory_id."},
+      {"endpoint": "PUT /api/inventory/{id}", "issue": "The request model accepts 'balance' but the handler silently ignores it (verified: 2 -> PUT 99 -> still 2). Either reject the field or implement an explicit stock correction endpoint — today a wrong quantity can only be fixed via a fake invoice/write-off."},
+      {"endpoint": "POST /api/warehouses", "issue": "workshop_id is not validated (any string accepted) and nothing prevents two warehouses mapping to the SAME workshop; warehouse_for_workshop() then picks an arbitrary one (find_one) so sale write-offs become non-deterministic."},
+      {"endpoint": "POST /api/warehouses", "issue": "Returns find_one({'_id': inserted_id}) without the restaurant_id filter (harmless but inconsistent with the tenancy convention used elsewhere)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Modal (components/admin/ui)", "issue": "Escape key does not close any modal (Приход/Перемещение/Списание/Склад) — only the X button works; after a failed submit the overlay keeps blocking the page until X is clicked", "selector": "div.fixed.inset-0.z-50", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/admin/menu product modal", "issues": ["The 'АВТО из рецепта' badge overlaps/collides with the 'СЕБЕСТОИМОСТЬ' label text (badge is absolutely positioned over the label) — visible at 1920px"]},
+      {"screen": "/admin/reports -> Склад -> Остатки по складам", "issues": ["Measure units are printed as raw English codes ('18 pcs', '5.6 kg') while the rest of the Russian UI uses шт/кг/л (Inventory page maps them correctly)", "Date range still uses the native browser date input (mm/dd/yyyy + OS picker) instead of a themed calendar component — inconsistent with the dark Russian UI (pre-existing)"]},
+      {"screen": "/admin/inventory -> Остатки with a warehouse filter selected", "issues": ["Items with no stock on the selected warehouse render as red 0.00 rows with a red-tinted background, so filtering by 'Склад Бар' makes 3 of 4 rows look like alerts; consider hiding or de-emphasising items absent from the selected warehouse"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_warehouse_iter10.py",
+    "/app/backend/tests/test_warehouse_edge_iter10.py",
+    "/app/backend/tests/cleanup_iter10.py",
+    "/app/test_reports/pytest/iter10_warehouse.xml",
+    "/app/test_reports/pytest/iter10_edge.xml",
+    "/app/test_reports/pytest/iter10_full.xml"
+  ],
+  "action_items": [
+    "DELETE /api/warehouses: adjust inventory.balance by the deleted stock quantities (or refuse deletion while stock remains) — currently leaves phantom balance",
+    "Validate warehouse_id/from_warehouse_id/to_warehouse_id against db.warehouses scoped by restaurant_id in /stock/transfer, /invoices, /writeoffs, /inventory (404/400 on unknown) — bogus ids currently create '—' phantom warehouse stock",
+    "Decide and document the negative-stock policy for sale auto-write-off (warn/flag or clamp) — pay currently drives per-warehouse stock below zero silently",
+    "stock-movement report: take the ingredient name from db.inventory, not from the invoice payload",
+    "Either honour or reject 'balance' in PUT /api/inventory (or add an explicit stock-correction endpoint)",
+    "Prevent/handle two warehouses mapped to the same workshop (unique constraint or deterministic pick) and validate workshop_id",
+    "UI: fix the 'АВТО из рецепта' badge overlapping the СЕБЕСТОИМОСТЬ label; translate measure units in the warehouse report; allow Escape to close modals"
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 2208 lines — split into routers (auth, catalog, pos, inventory/warehouse, reports, printing) before the next task; the warehouse helpers and reports are already hard to locate",
+    "adjust_stock() falls back to the default warehouse when warehouse_id is falsy AND blindly upserts, which is exactly why unknown/foreign warehouse ids silently create stock rows — validate the warehouse once at the API boundary instead",
+    "transfer_stock() duplicates the stock $inc logic instead of reusing adjust_stock (intentionally, to keep balance unchanged) — extract a move_stock() helper so the two code paths cannot drift",
+    "There is no unique index on db.stock {restaurant_id, inventory_id, warehouse_id}; concurrent upserts can create duplicate rows and double-counted 'stocks' entries",
+    "inventory.balance is a denormalised aggregate maintained by hand in 5 places (invoice, writeoff, transfer, sale, item create) — a single recompute helper (or dropping the field in favour of summing db.stock) would remove this class of desync bugs (see the DELETE /warehouses defect)"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_warehouse_iter10.py",
+    "/app/backend/tests/test_warehouse_edge_iter10.py",
+    "/app/backend/tests/cleanup_iter10.py"
+  ],
+  "success_rate": {"backend": "100% of the 19 Task-2 feature tests pass (173/173 full regression); 2 of 3 edge/integrity probes fail and document real defects", "frontend": "100% of tested flows pass (inventory 4 tabs, warehouse CRUD, invoice/transfer/writeoff modals, error toast, menu cost toggle + auto cost save, reports Склад tab)"},
+  "seed_data_creation": "All test artifacts removed: TEST_UI_Склад2 warehouse (leftover stock moved back to Склад Кухня before deletion), TEST_ inventory items/products, TEST-* invoices and TEST_ write-offs deleted via /app/backend/tests/cleanup_iter10.py; the +4/-1 Сыр quantity added by the UI invoice test was reverted (Сыр back to 9.55 on Склад Кухня). Demo data verified: 4 items, 2 warehouses, no orphan stock rows, balance == sum(stocks) for every item. Test orders created during testing were paid and closed (sale write-offs remain, as intended).",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "manager admin@resto.com/admin123; PIN admin 2222, waiter 1111",
+  "context_for_next_testing_agent": "Task-2 regression suite: /app/backend/tests/test_warehouse_iter10.py (all self-contained — each class creates its own TEST_ inventory item, so it is safe with pytest.ini's -n 2 --dist loadscope; do NOT reintroduce module-scoped shared stock fixtures, they race across xdist workers). /app/backend/tests/test_warehouse_edge_iter10.py intentionally FAILS 2 tests that pin the open defects (warehouse-delete balance desync, negative stock on sale) — they should turn green after the fixes. Run /app/backend/tests/cleanup_iter10.py after any warehouse testing (moves TEST warehouse stock back to default, deletes TEST docs, resyncs inventory.balance). Not re-tested this round (covered earlier): multi-tenancy/IDOR (iteration 9 — by-ID IDOR reported there is now fixed for warehouses at least), printing, shifts, sales/ABC reports.",
+  "rca_of_the_issue": "1) delete_warehouse() does db.stock.delete_many(...) but never touches the denormalised inventory.balance, while every other stock mutation goes through adjust_stock() which keeps both in sync — so removing a warehouse with stock leaves an inflated balance (repro: create warehouse W, create item with balance 5 on W, DELETE W, GET /api/inventory -> balance 5, stocks []). 2) adjust_stock()/transfer_stock() upsert into db.stock by (restaurant_id, inventory_id, warehouse_id) without ever verifying the warehouse exists, so any string passed as warehouse_id becomes a new 'warehouse' (repro: POST /api/stock/transfer or /api/invoices with warehouse_id='ffffffffffffffffffffffff' -> 200 and /api/inventory shows a stock row with warehouse_name '—'). Mitigation for both: resolve and validate warehouses at the API boundary and route every stock mutation (including deletions) through one helper that also maintains the aggregate."
+}

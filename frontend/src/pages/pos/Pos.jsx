@@ -34,11 +34,17 @@ export default function Pos() {
   const [voidConfirm, setVoidConfirm] = useState(null);
   const [voidReason, setVoidReason] = useState("");
   const [voidPin, setVoidPin] = useState("");
+  const [modPicker, setModPicker] = useState(null); // { product, groups }
+  const [modSel, setModSel] = useState({}); // { [group_id]: [option, ...] }
+  const [clientPhone, setClientPhone] = useState("");
+  const [client, setClient] = useState(null);
+  const [discountSource, setDiscountSource] = useState(null);
 
   const { data: shift, refetch: refetchShift } = useQuery({ queryKey: ["shift"], queryFn: async () => (await api.get("/shifts/current")).data });
   const { data: tables = [], refetch: refetchTables } = useQuery({ queryKey: ["pos-tables"], queryFn: async () => (await api.get("/tables")).data });
   const { data: categories = [] } = useQuery({ queryKey: ["categories"], queryFn: async () => (await api.get("/categories")).data });
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: async () => (await api.get("/products")).data });
+  const { data: modGroups = [] } = useQuery({ queryKey: ["modifier-groups"], queryFn: async () => (await api.get("/modifier-groups")).data });
 
   const cat = activeCat || categories[0]?.id;
   const shownProducts = useMemo(
@@ -179,14 +185,66 @@ export default function Pos() {
     } catch (e) { toast.error(apiErr(e)); }
   };
 
+  const onProductClick = (p) => {
+    const groups = modGroups.filter((g) => (p.modifier_group_ids || []).includes(g.id));
+    if (groups.length) { setModSel({}); setModPicker({ product: p, groups }); return; }
+    store.addItem(p);
+  };
+
+  const toggleModOption = (group, opt) => {
+    setModSel((prev) => {
+      const cur = prev[group.id] || [];
+      const exists = cur.find((o) => o.option_id === opt.id);
+      let next;
+      if (group.selection_type === "single") {
+        next = exists ? [] : [{ group_id: group.id, option_id: opt.id, name: opt.name, price_delta: opt.price_delta }];
+      } else {
+        if (exists) next = cur.filter((o) => o.option_id !== opt.id);
+        else {
+          if (cur.length >= (group.max_count || 99)) { toast.error(`Максимум ${group.max_count} в «${group.name}»`); return prev; }
+          next = [...cur, { group_id: group.id, option_id: opt.id, name: opt.name, price_delta: opt.price_delta }];
+        }
+      }
+      return { ...prev, [group.id]: next };
+    });
+  };
+
+  const confirmModifiers = () => {
+    for (const g of modPicker.groups) {
+      const sel = modSel[g.id] || [];
+      if (g.min_count > 0 && sel.length < g.min_count) {
+        toast.error(`Выберите минимум ${g.min_count} в «${g.name}»`); return;
+      }
+    }
+    const selected = modPicker.groups.flatMap((g) => modSel[g.id] || []);
+    store.addItem(modPicker.product, selected);
+    setModPicker(null); setModSel({});
+  };
+
+  const lookupClient = async (phone) => {
+    setClientPhone(phone);
+    const digits = phone.replace(/\D/g, "");
+    if (digits.length < 4) { setClient(null); return; }
+    try {
+      const { data } = await api.get(`/clients?phone=${digits}`);
+      setClient(data);
+      setDiscount(((subtotal * (data.discount_percent || 0)) / 100).toFixed(2));
+      setDiscountSource(`client:${data.name}`);
+    } catch { setClient(null); }
+  };
+
   const doPay = async () => {
     const id = await saveOrder();
     if (!id) return;
     try {
-      const { data } = await api.post(`/orders/${id}/pay`, { payment_method: pay, discount: Number(discount) });
+      const { data } = await api.post(`/orders/${id}/pay`, {
+        payment_method: pay, discount: Number(discount),
+        client_id: client?.id || null,
+        discount_source: discountSource || (Number(discount) > 0 ? "manual" : null),
+      });
       setReceipt(data);
       setCheckout(false);
-      setDiscount(0);
+      setDiscount(0); setClient(null); setClientPhone(""); setDiscountSource(null);
       store.clear();
       setView("tables");
       refetchTables();
@@ -276,10 +334,11 @@ export default function Pos() {
           <div className="flex-1 overflow-y-auto p-5">
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
               {shownProducts.map((p) => (
-                <button key={p.id} onClick={() => store.addItem(p)} data-testid={`pos-product-${p.id}`}
+                <button key={p.id} onClick={() => onProductClick(p)} data-testid={`pos-product-${p.id}`}
                   className="bg-[#1A1A1A] border border-[#27272A] rounded-lg p-4 flex flex-col items-start gap-2 hover:border-[#FF5A00] active:scale-95 transition-all text-left min-h-[100px]">
                   <Utensils size={16} className="text-[#52525B]" />
                   <span className="font-medium text-sm leading-tight">{p.name}</span>
+                  {(p.modifier_group_ids || []).length > 0 && <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#A855F711] text-[#A855F7] font-semibold">модификаторы</span>}
                   <span className="text-[#FF5A00] font-bold tabnum mt-auto">{money(p.price)}</span>
                 </button>
               ))}
@@ -305,6 +364,16 @@ export default function Pos() {
                       </span>
                       <button onClick={() => requestVoid(index, it)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`void-${index}`} title={printed ? "Сторно" : "Удалить"}><Trash2 size={14} /></button>
                     </div>
+                    {(it.selected_modifiers || []).length > 0 && (
+                      <div className="mb-2 pl-2 border-l-2 border-[#27272A] space-y-0.5" data-testid={`cart-mods-${index}`}>
+                        {(it.selected_modifiers || []).map((m, mi) => (
+                          <div key={mi} className="text-[11px] text-[#A1A1AA] flex justify-between">
+                            <span>+ {m.name}</span>
+                            {m.price_delta ? <span className="tabnum text-[#52525B]">+{money(m.price_delta)}</span> : null}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     <div className="flex justify-between items-center">
                       {printed ? (
                         <span className="text-sm text-[#A1A1AA] tabnum">× {it.count}</span>
@@ -317,7 +386,7 @@ export default function Pos() {
                             className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Plus size={14} /></button>
                         </div>
                       )}
-                      <span className="tabnum font-semibold text-[#FF5A00]">{money(it.price * it.count)}</span>
+                      <span className="tabnum font-semibold text-[#FF5A00]">{money((it.price + (it.selected_modifiers || []).reduce((a, m) => a + (m.price_delta || 0), 0)) * it.count)}</span>
                     </div>
                   </div>
                 );
@@ -368,9 +437,26 @@ export default function Pos() {
             <div className="space-y-4">
               <div className="flex justify-between text-[#A1A1AA]"><span>Сумма</span><span className="tabnum">{money(subtotal)}</span></div>
               <div>
-                <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA]">Скидка (₽)</label>
-                <input type="number" value={discount} onChange={(e) => setDiscount(e.target.value)} data-testid="discount-input"
+                <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA]">Клиент (телефон)</label>
+                <input value={clientPhone} onChange={(e) => lookupClient(e.target.value)} data-testid="client-phone-input"
+                  placeholder="+7 900 000-00-00"
                   className="w-full mt-1 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 outline-none focus:border-[#FF5A00]" />
+                {client && (
+                  <div className="mt-2 flex items-center justify-between bg-[#00E67611] border border-[#00E676]/30 rounded-lg px-3 py-2 text-sm" data-testid="client-match">
+                    <span className="text-[#00E676] font-medium">{client.name}</span>
+                    <span className="text-[#A1A1AA]">скидка {client.discount_percent}%</span>
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA]">Скидка (₽)</label>
+                <input type="number" value={discount} onChange={(e) => { setDiscount(e.target.value); setDiscountSource("manual"); }} data-testid="discount-input"
+                  className="w-full mt-1 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 outline-none focus:border-[#FF5A00]" />
+                {Number(discount) > 0 && (
+                  <p className="text-[11px] text-[#A1A1AA] mt-1" data-testid="discount-source">
+                    Источник: {discountSource === "manual" ? "Ручная" : discountSource?.startsWith("client:") ? `Клиент (${client?.discount_percent || 0}%)` : "—"}
+                  </p>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <button onClick={() => setPay("cash")} data-testid="pay-cash"
@@ -391,6 +477,53 @@ export default function Pos() {
                 Принять оплату
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modifier picker modal */}
+      {modPicker && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-4" onClick={() => setModPicker(null)}>
+          <div className="w-full max-w-md bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up max-h-[88vh] overflow-y-auto" onClick={(e) => e.stopPropagation()} data-testid="modifier-picker">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-head text-xl font-bold">{modPicker.product.name}</h3>
+              <button onClick={() => setModPicker(null)} data-testid="modpicker-close"><X size={20} className="text-[#A1A1AA]" /></button>
+            </div>
+            <div className="space-y-5">
+              {modPicker.groups.map((g) => (
+                <div key={g.id} data-testid={`modpicker-group-${g.id}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-semibold text-sm">{g.name}</span>
+                    <span className="text-[11px] text-[#52525B]">
+                      {g.min_count > 0 ? "обязательно · " : ""}{g.selection_type === "single" ? "один" : `до ${g.max_count}`}
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {(g.options || []).map((o) => {
+                      const on = (modSel[g.id] || []).some((x) => x.option_id === o.id);
+                      return (
+                        <button key={o.id} onClick={() => toggleModOption(g, o)} data-testid={`modpicker-option-${o.id}`}
+                          className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg border text-sm transition-colors ${on ? "border-[#FF5A00] bg-[#FF5A0011] text-white" : "border-[#27272A] bg-[#0A0A0A] text-[#A1A1AA]"}`}>
+                          <span>{o.name}</span>
+                          <span className="tabnum">{o.price_delta ? `+${money(o.price_delta)}` : "—"}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-between items-center mt-5 pt-4 border-t border-[#27272A]">
+              <span className="text-[#A1A1AA] text-sm">Доплата</span>
+              <span className="tabnum text-[#FF5A00] font-bold">
+                {money(modPicker.groups.flatMap((g) => modSel[g.id] || []).reduce((a, m) => a + (m.price_delta || 0), 0))}
+              </span>
+            </div>
+            <button onClick={confirmModifiers} data-testid="modpicker-confirm"
+              disabled={modPicker.groups.some((g) => (g.min_count || 0) > 0 && (modSel[g.id] || []).length < g.min_count)}
+              className="w-full mt-4 bg-[#FF5A00] hover:bg-[#E04F00] disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-lg py-3.5 font-semibold active:scale-95 transition-transform">
+              Добавить в заказ
+            </button>
           </div>
         </div>
       )}
@@ -552,9 +685,15 @@ export default function Pos() {
               <div className="text-center font-bold mb-2">RESTOCONTROL</div>
               <div className="border-b border-dashed border-black mb-2 pb-2 text-center text-xs">Чек · {(receipt.closed_at || "").slice(0, 16).replace("T", " ")}</div>
               {receipt.items.map((it, i) => (
-                <div key={i} className="flex justify-between"><span>{it.name} ×{it.count}</span><span>{it.total.toFixed(2)}</span></div>
+                <div key={i}>
+                  <div className="flex justify-between"><span>{it.name} ×{it.count}</span><span>{it.total.toFixed(2)}</span></div>
+                  {(it.selected_modifiers || []).map((m, mi) => (
+                    <div key={mi} className="flex justify-between text-[10px] pl-2"><span>+ {m.name}</span><span>{m.price_delta ? `+${m.price_delta.toFixed(2)}` : ""}</span></div>
+                  ))}
+                </div>
               ))}
-              {receipt.discount > 0 && <div className="flex justify-between mt-2"><span>Скидка</span><span>-{receipt.discount.toFixed(2)}</span></div>}
+              {receipt.client_name && <div className="flex justify-between mt-2 text-xs"><span>Клиент</span><span>{receipt.client_name}</span></div>}
+              {receipt.discount > 0 && <div className="flex justify-between mt-1"><span>Скидка{receipt.discount_percent ? ` (${receipt.discount_percent}%)` : ""}</span><span>-{receipt.discount.toFixed(2)}</span></div>}
               <div className="flex justify-between font-bold border-t border-dashed border-black mt-2 pt-2">
                 <span>ИТОГО</span><span>{receipt.total.toFixed(2)} ₽</span>
               </div>

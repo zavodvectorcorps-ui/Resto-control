@@ -63,6 +63,25 @@
 - Миграция: seed() бэкфиллит restaurant_id на все документы. Данные сохранены (products=8, orders=124, staff=3).
 - UI-переключатель заведений отложен (одно заведение). Settings (чек) пока общие.
 
+## Implemented (2026-06 — Задача 2: Мультисклад + автосебестоимость) ✅ протестировано (iteration_10, 19/19 core + edge)
+- Коллекция `warehouses` (name, workshop_id, is_default) + CRUD `/warehouses`. Сид: «Склад Кухня» (default, цех Кухня) и «Склад Бар» (цех Бар). Уникальный индекс на `stock` {restaurant_id, inventory_id, warehouse_id}.
+- Остатки по паре (inventory_id, warehouse_id) в коллекции `stock`; `inventory.balance` = денормализованный агрегат (сумма по складам), синхронизируется через `adjust_stock`.
+- Приход (`/invoices`), списание (`/writeoffs`), начальный остаток позиции — с `warehouse_id` (валидируется через `resolve_warehouse`, 404 на чужой/несуществующий). Перемещение `/stock/transfer` (не меняет агрегат). Авто-списание продажи — со склада, привязанного к цеху блюда (`warehouse_for_workshop`).
+- Автосебестоимость блюда: `cost_source` = auto|manual. auto → cost считается из тех.карты и цен прихода (`compute_product_cost`), пересчитывается при сохранении блюда и при накладной, меняющей цену ингредиента (`recompute_products_for_ingredients`). manual — не трогается.
+- Отчёты: `/reports/inventory` (остатки по складам, стоимость), `/reports/stock-movement` (приход/расход/итого за период, перемещения исключены). ✅ Задача 5 stock-movement закрыта.
+- Фронт: Inventory.jsx (вкладки Остатки/Склады/Накладные/Движения, фильтр по складу, селекторы склада в модалках прихода/списания/перемещения, управление складами), Menu.jsx (тумблер АВТО/РУЧ. себестоимости), Reports.jsx (вкладка «Склад»).
+- Исправлено по отчёту тестировщика: desync balance при удалении склада (теперь снимает остатки), валидация warehouse_id (404 на bogus/чужой), имя в stock-movement из inventory.
+- ПОЛИТИКА отрицательного остатка: продажа НИКОГДА не блокируется по остатку (POS-стандарт); нулевой/минусовой остаток подсвечивается красным в UI. Осознанное решение, не баг.
+
+## Implemented (2026-06 — Задача 3: Модификаторы + Задача 4: Клиенты и скидки) ✅ протестировано (iteration_11, 23 + edge; регрессия 206 passed)
+- Модификаторы: коллекции `modifier_groups` (name, selection_type single|multiple, min_count, max_count) + `modifier_options` (name, price_delta, inventory_id?, amount?). CRUD `/modifier-groups`, `/modifier-groups/{gid}/options` (manager-only, 404 на unknown group/option, selection_type валидируется). Блюдо хранит `modifier_group_ids`. Удаление группы каскадит опции и `$pull` из products.
+- Заказ: OrderItem.selected_modifiers. **Серверная валидация и цена (безопасность):** `validate_and_price_items` резолвит name/price_delta из БД (клиентские значения игнорируются — закрыта манипуляция ценой), проверяет принадлежность опции группам блюда и min/max → 400. Итог позиции = (base + Σ delta) × count.
+- Списание модификаторов при оплате: опция с inventory_id+amount списывается со склада цеха блюда (writeoff kind=sale, name "… (модификатор)").
+- Печать: модификаторы печатаются с отступом под блюдом (кухня + пречек).
+- Клиенты: коллекция `clients` (name, phone, phone_digits, discount_percent). CRUD `/clients` (уникальный телефон, поиск `?phone=` — суффикс-анкор, ≥7 цифр, иначе 404; delete manager-only, 404 на unknown). Waiter/admin читают+создают.
+- Скидка по клиенту: pay принимает client_id + discount + discount_source; на заказе сохраняются discount_percent, discount_source, client_id, client_name. Отчёт `/reports/sales?group_by=client` (заказы/выручка/скидки по клиенту).
+- Фронт: Menu.jsx (вкладка «Модификаторы» с CRUD групп/опций, тумблеры групп в редакторе блюда, «обязательный выбор» для single), POS Pos.jsx (пикер модификаторов с min/max, кнопка блокируется при незаполненном обязательном, модификаторы в корзине и чеке, поиск клиента по телефону + автоскидка + источник), Clients.jsx (новая страница + nav «Клиенты»), Reports.jsx (тумблер «По клиентам»).
+
 ## ОБНОВЛЁННЫЙ БРИФ (q4ubq956) — 16 задач + мультитенантность
 - Архитектурное замечание: заложить restaurant_id во ВСЕ сущности + фильтрацию в db-запросах + в JWT/сессию, дефолтный Restaurant «Мята», миграция. UI-переключатель заведения можно отложить. (НЕ сделано)
 - Задачи 0,1 — ✅ сделаны ранее. Задача 5 — ✅ сделана (кроме stock-movement).

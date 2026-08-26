@@ -2,7 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import {
   LayoutDashboard, UtensilsCrossed, Factory, Grid3x3, Warehouse,
-  Users, BarChart3, LogOut, ChefHat, Monitor, Printer,
+  Users, BarChart3, LogOut, ChefHat, Monitor, Printer, Contact,
 } from "lucide-react";
 
 const items = [
@@ -13,6 +13,7 @@ const items = [
   { to: "/admin/inventory", icon: Warehouse, label: "Склад" },
   { to: "/admin/printers", icon: Printer, label: "Печать" },
   { to: "/admin/staff", icon: Users, label: "Сотрудники" },
+  { to: "/admin/clients", icon: Contact, label: "Клиенты" },
   { to: "/admin/reports", icon: BarChart3, label: "Отчёты" },
 ];
 
