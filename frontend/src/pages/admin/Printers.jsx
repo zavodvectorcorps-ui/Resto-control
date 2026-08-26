@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import api, { apiErr } from "@/lib/api";
 import { toast } from "sonner";
@@ -39,6 +39,22 @@ export default function Printers() {
   const [imgName, setImgName] = useState("");
   const [logoModal, setLogoModal] = useState(false);
   const [logoData, setLogoData] = useState(null);
+  const [receiptForm, setReceiptForm] = useState({ name: "", address: "", phone: "", footer_note: "" });
+
+  useEffect(() => {
+    if (settings) setReceiptForm({
+      name: settings.name || "", address: settings.address || "",
+      phone: settings.phone || "", footer_note: settings.footer_note || "",
+    });
+  }, [settings]);
+
+  const saveReceipt = async () => {
+    try {
+      await api.put("/settings/receipt", receiptForm);
+      toast.success("Данные чека сохранены");
+      qc.invalidateQueries({ queryKey: ["settings"] });
+    } catch (e) { toast.error(apiErr(e)); }
+  };
 
   const onLogoFile = (e) => {
     const f = e.target.files?.[0];
@@ -188,29 +204,40 @@ export default function Printers() {
       <PageHead title="Печать" subtitle="Принтеры по цехам, агенты-мосты и очередь заданий"
         action={<Btn onClick={() => openPrinter(null)} data-testid="add-printer-btn"><Plus size={16} className="inline mr-1" /> Принтер</Btn>} />
 
-      {/* Logo on receipts */}
-      <div className="bg-[#121212] border border-[#27272A] rounded-xl p-5 mb-8 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
+      {/* Receipt settings: логотип + данные заведения */}
+      <div className="bg-[#121212] border border-[#27272A] rounded-xl p-5 mb-8">
+        <h2 className="font-head text-lg font-bold mb-4">Настройка чека</h2>
+        <div className="flex items-start gap-4 mb-5">
           <div className="w-24 h-16 rounded-lg bg-white flex items-center justify-center overflow-hidden shrink-0">
             {settings?.logo_image
               ? <img src={settings.logo_image} alt="logo" className="max-h-full max-w-full object-contain" data-testid="logo-preview" />
               : <ImageIcon className="text-[#52525B]" size={22} />}
           </div>
-          <div>
+          <div className="flex-1">
             <div className="font-semibold">Логотип на чеках</div>
-            <div className="text-xs text-[#A1A1AA]">Печатается в шапке заказных чеков и пречеков</div>
+            <div className="text-xs text-[#A1A1AA]">Печатается по центру в шапке заказных чеков и пречеков</div>
             {settings?.logo_image && !settings?.logo_enabled && <div className="text-xs text-[#FACC15] mt-1">Загружен, но выключен</div>}
           </div>
+          <div className="flex items-center gap-3">
+            {settings?.logo_image && (
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <input type="checkbox" checked={!!settings?.logo_enabled} onChange={(e) => toggleLogo(e.target.checked)} className="accent-[#FF5A00] w-4 h-4" data-testid="logo-toggle" />
+                Печатать
+              </label>
+            )}
+            <Btn variant="ghost" onClick={() => { setLogoData(null); setLogoModal(true); }} data-testid="upload-logo-btn"><Upload size={16} className="inline mr-1" /> {settings?.logo_image ? "Заменить" : "Логотип"}</Btn>
+            {settings?.logo_image && <button onClick={removeLogo} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid="remove-logo-btn"><Trash2 size={16} /></button>}
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          {settings?.logo_image && (
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" checked={!!settings?.logo_enabled} onChange={(e) => toggleLogo(e.target.checked)} className="accent-[#FF5A00] w-4 h-4" data-testid="logo-toggle" />
-              Печатать
-            </label>
-          )}
-          <Btn variant="ghost" onClick={() => { setLogoData(null); setLogoModal(true); }} data-testid="upload-logo-btn"><Upload size={16} className="inline mr-1" /> {settings?.logo_image ? "Заменить" : "Загрузить"}</Btn>
-          {settings?.logo_image && <button onClick={removeLogo} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid="remove-logo-btn"><Trash2 size={16} /></button>}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-[#27272A] pt-5">
+          <Field label="Название заведения" value={receiptForm.name} onChange={(e) => setReceiptForm({ ...receiptForm, name: e.target.value })} data-testid="receipt-name-input" />
+          <Field label="Телефон" value={receiptForm.phone} onChange={(e) => setReceiptForm({ ...receiptForm, phone: e.target.value })} data-testid="receipt-phone-input" />
+          <Field label="Адрес" value={receiptForm.address} onChange={(e) => setReceiptForm({ ...receiptForm, address: e.target.value })} data-testid="receipt-address-input" />
+          <Field label="Подпись внизу чека" value={receiptForm.footer_note} onChange={(e) => setReceiptForm({ ...receiptForm, footer_note: e.target.value })} data-testid="receipt-footer-input" />
+        </div>
+        <div className="flex items-center justify-between mt-4">
+          <p className="text-xs text-[#52525B]">Название, адрес и телефон печатаются в шапке пречека (счёта гостю).</p>
+          <Btn onClick={saveReceipt} data-testid="save-receipt-btn">Сохранить данные чека</Btn>
         </div>
       </div>
 

@@ -206,6 +206,7 @@ class RecipeIngredient(BaseModel):
     inventory_id: str
     name: str
     amount: float
+    unit: Optional[str] = None  # единица, в которой задан amount (kg/g/l/ml/pcs); None = единица склада
 
 
 class ProductReq(BaseModel):
@@ -344,6 +345,13 @@ class PrintImageReq(BaseModel):
 class LogoReq(BaseModel):
     image: Optional[str] = None
     enabled: Optional[bool] = None
+
+
+class ReceiptSettingsReq(BaseModel):
+    name: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    footer_note: Optional[str] = None
 
 
 class SplitReq(BaseModel):
@@ -755,8 +763,13 @@ async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_role
         if not prod:
             continue
         for ing in prod.get("recipe", []):
-            amt = round(ing["amount"] * it["count"], 4)
-            if amt <= 0 or not ObjectId.is_valid(ing["inventory_id"]):
+            if not ObjectId.is_valid(ing["inventory_id"]):
+                continue
+            inv = await db.inventory.find_one({"_id": ObjectId(ing["inventory_id"])})
+            stock_unit = inv.get("measure", "kg") if inv else "kg"
+            per_portion = convert_amount(ing["amount"], ing.get("unit"), stock_unit)
+            amt = round(per_portion * it["count"], 4)
+            if amt <= 0:
                 continue
             await db.inventory.update_one(
                 {"_id": ObjectId(ing["inventory_id"])}, {"$inc": {"balance": -amt}}
@@ -1011,10 +1024,21 @@ def _fmt_count(c) -> str:
     return str(int(c)) if float(c) == int(c) else str(c)
 
 
-def build_lines(kind: str, table_name: str, waiter: str, items: List[dict], subtotal=None) -> List[str]:
-    title = {"ticket": "*** ЗАКАЗ ***", "void": "*** СТОРНО ***", "precheck": "--- ПРЕДЧЕК ---"}[kind]
-    lines = [title, f"Стол: {table_name}", f"Официант: {waiter}",
-             now_utc().strftime("%d.%m.%Y %H:%M"), "-" * 32]
+def build_lines(kind: str, table_name: str, waiter: str, items: List[dict], subtotal=None, venue=None) -> List[str]:
+    venue = venue or {}
+    lines = []
+    if kind == "precheck":
+        name = (venue.get("name") or "").strip()
+        lines.append(name if name else "ПРЕДЧЕК")           # первая строка — крупно/по центру
+        if venue.get("address"):
+            lines.append(venue["address"])
+        if venue.get("phone"):
+            lines.append("тел. " + venue["phone"])
+        lines.append("--- ПРЕДЧЕК ---")
+    else:
+        lines.append({"ticket": "*** ЗАКАЗ ***", "void": "*** СТОРНО ***"}.get(kind, "ЧЕК"))
+    lines += [f"Стол: {table_name}", f"Официант: {waiter}",
+              now_utc().strftime("%d.%m.%Y %H:%M"), "-" * 32]
     for it in items:
         if kind == "precheck":
             total = it.get("total", it["price"] * it["count"])
@@ -1024,6 +1048,9 @@ def build_lines(kind: str, table_name: str, waiter: str, items: List[dict], subt
     if kind == "precheck" and subtotal is not None:
         lines.append("-" * 32)
         lines.append(_pad("ИТОГО:", f"{subtotal:.2f}"))
+        if venue.get("footer_note"):
+            lines.append("")
+            lines.append(venue["footer_note"])
     return lines
 
 
@@ -1036,10 +1063,17 @@ async def _table_name(tid) -> str:
 
 async def make_job(order: dict, printer: dict, jtype: str, items: List[dict], subtotal=None) -> dict:
     table_name = await _table_name(order.get("table_id"))
-    lines = build_lines(jtype, table_name, order.get("waiter_name", ""), items, subtotal)
+    venue = await db.settings.find_one({"key": "venue"}) or {}
+    lines = build_lines(jtype, table_name, order.get("waiter_name", ""), items, subtotal, venue)
     codepage_label = printer.get("codepage_label", "cp866")
     escape_t_value = printer.get("escape_t_value", 17)
-    logo = await logo_raster_for(printer)
+    logo = None
+    if venue.get("logo_enabled") and venue.get("logo_image"):
+        try:
+            logo = _raster_bytes(base64.b64decode(_b64_from_dataurl(venue["logo_image"])),
+                                 width_dots_for(printer.get("paper_width_mm", 80)), max_h=400)
+        except Exception:
+            logo = None
     payload = base64.b64encode(render_escpos(lines, codepage_label, escape_t_value, logo_raster=logo)).decode()
     return await create_raw_job(printer, jtype, payload, "\n".join(lines), order_id=str(order["_id"]))
 
@@ -1068,6 +1102,20 @@ async def create_raw_job(printer: dict, jtype: str, payload_b64: str, text_previ
 
 def width_dots_for(paper_width_mm: int) -> int:
     return 384 if paper_width_mm and paper_width_mm <= 58 else 576
+
+
+_UNIT_FACTOR = {"kg": 1.0, "g": 0.001, "l": 1.0, "ml": 0.001, "pcs": 1.0}
+_UNIT_FAMILY = {"kg": "mass", "g": "mass", "l": "vol", "ml": "vol", "pcs": "count"}
+
+
+def convert_amount(amount: float, from_unit: Optional[str], to_unit: str) -> float:
+    """Пересчёт количества из единицы тех.карты в единицу склада (кг↔г, л↔мл)."""
+    fu = from_unit or to_unit
+    if fu == to_unit:
+        return amount
+    if _UNIT_FAMILY.get(fu) == _UNIT_FAMILY.get(to_unit) and fu in _UNIT_FACTOR and to_unit in _UNIT_FACTOR:
+        return amount * _UNIT_FACTOR[fu] / _UNIT_FACTOR[to_unit]
+    return amount  # разные семейства единиц — без пересчёта
 
 
 def _b64_from_dataurl(s: str) -> str:
@@ -1122,10 +1170,24 @@ async def logo_raster_for(printer: dict) -> Optional[bytes]:
 
 @api.get("/settings")
 async def get_settings(user: dict = Depends(get_current_user)):
+    doc = await db.settings.find_one({"key": "venue"}) or {}
+    return {
+        "logo_enabled": bool(doc.get("logo_enabled")),
+        "logo_image": doc.get("logo_image"),
+        "name": doc.get("name", ""),
+        "address": doc.get("address", ""),
+        "phone": doc.get("phone", ""),
+        "footer_note": doc.get("footer_note", ""),
+    }
+
+
+@api.put("/settings/receipt")
+async def set_receipt(req: ReceiptSettingsReq, user: dict = Depends(require_roles("admin"))):
+    update = {k: (v or "") for k, v in req.model_dump().items() if v is not None}
+    await db.settings.update_one({"key": "venue"}, {"$set": {"key": "venue", **update}}, upsert=True)
     doc = await db.settings.find_one({"key": "venue"})
-    if not doc:
-        return {"logo_enabled": False, "logo_image": None}
-    return {"logo_enabled": bool(doc.get("logo_enabled")), "logo_image": doc.get("logo_image")}
+    return {"name": doc.get("name", ""), "address": doc.get("address", ""),
+            "phone": doc.get("phone", ""), "footer_note": doc.get("footer_note", "")}
 
 
 @api.put("/settings/logo")

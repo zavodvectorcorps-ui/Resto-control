@@ -1,0 +1,30 @@
+{
+  "summary": "Frontend-only verification of two new admin features: (1) unit dropdown in Menu recipe editor (тех.карта) with kg↔g conversion on write-off, (2) 'Настройка чека' section on Печать page (name/phone/address/footer + logo controls). All 5 requested scenarios PASSED, including full end-to-end money/stock check via POS.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Minor testability: logo-toggle checkbox is fully controlled by the settings query (no optimistic update), so its DOM state only flips after the refetch completes (~1-2s). Playwright's checkbox.uncheck()/check() helpers fail ('Clicking the checkbox did not change its state'); plain .click() + wait works. Consider optimistic local state for snappier UX/testing.",
+    "Minor testability: the inventory <select> inside each ingredient row (Menu.jsx line 183) has no data-testid — suggest ingredient-inventory-N to match ingredient-amount-N / ingredient-unit-N."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "not tested (frontend-only request)", "frontend": "100%" },
+  "seed_data_creation": "Created 1 POS order (Классический бургер x2, Стол 1) as cashier Мария; order was paid and is now 'closed'. No open/sent orders remain (verified via GET /api/orders — all 70 orders are 'closed'). Uploaded a temp test logo and removed it afterwards. Receipt settings currently: Кафе Мята / +7 900 111-22-33 / ул. Тестовая, 15 / Спасибо за визит! (overwrote earlier curl values).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "admin@resto.com / admin123; cashier PIN 2222 (from /app/memory/test_credentials.md)",
+  "detailed_results": {
+    "1_recipe_unit_dropdown": "PASS — burger modal shows 2 ingredient rows. Row0 Говядина: amount input + unit select with options [кг, г]; row1 Булочки: unit select with only [шт]. Set amount=150, unit=г, clicked save-product-btn → 'Сохранено' toast, modal closed, no errors. Reopening the modal shows persisted 150 / g.",
+    "2_add_ingredient_defaults_and_reset": "PASS — add-ingredient-btn adds row defaulting to first stock item (Булочки, unit=pcs, opts=[шт]). Changing inventory item in the row correctly resets unit options: Булочки→pcs [шт], Говядина/Кофе зерно/Сыр→kg [кг, г]. Row removal works.",
+    "3_receipt_settings_form": "PASS — 'Настройка чека' visible with all 4 inputs prefilled from GET /api/settings; saving via save-receipt-btn shows toast 'Данные чека сохранены'; after full page reload all 4 values persisted (Кафе Мята / +7 900 111-22-33 / ул. Тестовая, 15 / Спасибо за визит!).",
+    "4_logo_controls": "PASS — upload-logo-btn opens modal, logo-file-input + save-logo-btn saves valid PNG ('Логотип сохранён', preview rendered). logo-toggle disables/enables (persists across reload; 'Загружен, но выключен' hint appears when off). remove-logo-btn → 'Логотип удалён', preview and remove button disappear. Invalid image upload correctly returns 400 with Russian error toast 'Не удалось обработать изображение. Загрузите корректный PNG или JPG.' (expected behaviour, not a bug).",
+    "5_e2e_unit_conversion": "PASS — Склад Говядина before = 14.75 кг; sold 2× Классический бургер (150 г beef each) as cashier (open shift → table → send to kitchen → precheck → cash payment); Говядина after = 14.45 кг (exactly -0.30 kg). Precheck preview rendered header 'Кафе Мята / ул. Тестовая, 15 / тел. +7 900 111-22-33 / --- ПРЕДЧЕК --- / Стол 1 / позиции / ИТОГО: 25.00 / Спасибо за визит!'."
+  },
+  "context_for_next_testing_agent": "Recipe of 'Классический бургер' is now Говядина 150 г + Булочки 1 шт. Beef balance ≈14.45 kg. Receipt settings set to Кафе Мята / ул. Тестовая, 15 / +7 900 111-22-33 / Спасибо за визит!. Logo is currently removed (settings.logo_image = null). A cashier shift was opened and left open. For logo-toggle use .click() + wait_for_timeout(2000) instead of Playwright check()/uncheck().",
+  "rca_of_the_issue": "No functional defects found. The only 400 seen in console was from an intentionally malformed PNG in the test (server-side Pillow validation working as designed)."
+}

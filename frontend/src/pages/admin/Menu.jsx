@@ -7,6 +7,12 @@ import { PageHead, Btn, Field, SelectField, Modal } from "@/components/admin/ui"
 
 const money = (n) => `${Number(n || 0).toFixed(2)} ₽`;
 
+const unitOptions = (measure) => {
+  if (measure === "kg") return [{ value: "kg", label: "кг" }, { value: "g", label: "г" }];
+  if (measure === "l") return [{ value: "l", label: "л" }, { value: "ml", label: "мл" }];
+  return [{ value: "pcs", label: "шт" }];
+};
+
 export default function Menu() {
   const qc = useQueryClient();
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: async () => (await api.get("/products")).data });
@@ -31,14 +37,16 @@ export default function Menu() {
   const addIngredient = () => {
     const first = inventory[0];
     if (!first) { toast.error("Сначала добавьте позиции на склад"); return; }
-    setForm((f) => ({ ...f, recipe: [...(f.recipe || []), { inventory_id: first.id, name: first.name, amount: 1 }] }));
+    setForm((f) => ({ ...f, recipe: [...(f.recipe || []), { inventory_id: first.id, name: first.name, amount: 1, unit: first.measure }] }));
   };
   const updateIngredient = (i, field, value) => {
     setForm((f) => {
       const recipe = [...(f.recipe || [])];
       if (field === "inventory_id") {
         const inv = inventory.find((x) => x.id === value);
-        recipe[i] = { ...recipe[i], inventory_id: value, name: inv?.name || "" };
+        recipe[i] = { ...recipe[i], inventory_id: value, name: inv?.name || "", unit: inv?.measure || "pcs" };
+      } else if (field === "unit") {
+        recipe[i] = { ...recipe[i], unit: value };
       } else {
         recipe[i] = { ...recipe[i], amount: value };
       }
@@ -53,7 +61,7 @@ export default function Menu() {
         name: form.name, price: Number(form.price), cost: Number(form.cost),
         measure: form.measure, category_id: form.category_id, workshop_id: form.workshop_id,
         for_sale: form.for_sale ?? true, image: form.image || null,
-        recipe: (form.recipe || []).map((r) => ({ inventory_id: r.inventory_id, name: r.name, amount: Number(r.amount) })),
+        recipe: (form.recipe || []).map((r) => ({ inventory_id: r.inventory_id, name: r.name, amount: Number(r.amount), unit: r.unit || null })),
       };
       if (editing) await api.put(`/products/${editing.id}`, body);
       else await api.post("/products", body);
@@ -172,12 +180,16 @@ export default function Menu() {
               {(form.recipe || []).length === 0 && <p className="text-xs text-[#52525B]">Списание со склада не настроено</p>}
               {(form.recipe || []).map((r, i) => (
                 <div key={i} className="flex gap-2 items-center" data-testid={`ingredient-row-${i}`}>
-                  <select value={r.inventory_id} onChange={(e) => updateIngredient(i, "inventory_id", e.target.value)}
-                    className="flex-1 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#FF5A00]">
-                    {inventory.map((inv) => <option key={inv.id} value={inv.id}>{inv.name} ({inv.measure})</option>)}
+                  <select value={r.inventory_id} onChange={(e) => updateIngredient(i, "inventory_id", e.target.value)} data-testid={`ingredient-inventory-${i}`}
+                    className="flex-1 min-w-0 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#FF5A00]">
+                    {inventory.map((inv) => <option key={inv.id} value={inv.id}>{inv.name}</option>)}
                   </select>
                   <input type="number" step="0.001" value={r.amount} onChange={(e) => updateIngredient(i, "amount", e.target.value)}
-                    className="w-20 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-3 py-2 text-sm outline-none focus:border-[#FF5A00]" data-testid={`ingredient-amount-${i}`} />
+                    className="w-16 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-2 py-2 text-sm outline-none focus:border-[#FF5A00]" data-testid={`ingredient-amount-${i}`} />
+                  <select value={r.unit || ""} onChange={(e) => updateIngredient(i, "unit", e.target.value)}
+                    className="w-16 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-2 py-2 text-sm outline-none focus:border-[#FF5A00]" data-testid={`ingredient-unit-${i}`}>
+                    {unitOptions(inventory.find((x) => x.id === r.inventory_id)?.measure).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
                   <button onClick={() => removeIngredient(i)} className="text-[#A1A1AA] hover:text-[#FF3B30]"><Trash2 size={16} /></button>
                 </div>
               ))}
