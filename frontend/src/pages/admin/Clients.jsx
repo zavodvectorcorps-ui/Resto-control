@@ -33,7 +33,7 @@ export default function Clients() {
 
   const save = async () => {
     try {
-      const body = { name: form.name, phone: form.phone, discount_percent: Number(form.discount_percent || 0), loyalty_group_id: form.loyalty_group_id || null };
+      const body = { name: form.name, phone: form.phone, discount_percent: Number(form.discount_percent || 0), loyalty_group_id: form.loyalty_group_id || null, credit_limit: Number(form.credit_limit || 0) };
       if (form.id) await api.put(`/clients/${form.id}`, body);
       else await api.post("/clients", body);
       toast.success("Сохранено"); setModal(false); setForm({});
@@ -85,7 +85,7 @@ export default function Clients() {
                   <div className="flex gap-2 justify-end">
                     <button onClick={() => setHistoryFor(c)} className="text-[#A1A1AA] hover:text-[#C084FC]" data-testid={`debt-history-${c.id}`} title="История долга"><History size={16} /></button>
                     <button onClick={() => { setBonusFor(c); setBonusAmt(""); }} className="text-[#00E676] hover:text-white text-xs font-semibold" data-testid={`bonus-client-${c.id}`}>± бонус</button>
-                    <button onClick={() => { setForm({ id: c.id, name: c.name, phone: c.phone, discount_percent: c.discount_percent, loyalty_group_id: c.loyalty_group_id }); setModal(true); }} className="text-[#A1A1AA] hover:text-white" data-testid={`edit-client-${c.id}`}><Pencil size={16} /></button>
+                    <button onClick={() => { setForm({ id: c.id, name: c.name, phone: c.phone, discount_percent: c.discount_percent, loyalty_group_id: c.loyalty_group_id, credit_limit: c.credit_limit ?? 0 }); setModal(true); }} className="text-[#A1A1AA] hover:text-white" data-testid={`edit-client-${c.id}`}><Pencil size={16} /></button>
                     <button onClick={() => del(c.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-client-${c.id}`}><Trash2 size={16} /></button>
                   </div>
                 </td>
@@ -101,6 +101,7 @@ export default function Clients() {
           <Field label="Имя" value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="client-name-input" />
           <Field label="Телефон" value={form.phone || ""} onChange={(e) => setForm({ ...form, phone: e.target.value })} data-testid="client-phone-field" />
           <Field label="Скидка, %" type="number" value={form.discount_percent ?? 0} onChange={(e) => setForm({ ...form, discount_percent: e.target.value })} data-testid="client-discount-input" />
+          <Field label="Лимит долга, ₽ (0 = без лимита)" type="number" value={form.credit_limit ?? 0} onChange={(e) => setForm({ ...form, credit_limit: e.target.value })} data-testid="client-credit-limit-input" />
           <SelectField label="Группа лояльности" value={form.loyalty_group_id || ""} onChange={(e) => setForm({ ...form, loyalty_group_id: e.target.value })}
             options={[{ value: "", label: "— нет —" }, ...lgroups.map((g) => ({ value: g.id, label: `${g.name} (${g.type === "bonus" ? "кэшбэк" : "скидка"} ${g.value_percent}%)` }))]} data-testid="client-lgroup-select" />
           <Btn onClick={save} className="w-full" data-testid="save-client-btn">Сохранить</Btn>

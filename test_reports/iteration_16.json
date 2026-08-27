@@ -1,0 +1,35 @@
+{
+  "summary": "Frontend-only E2E testing (Playwright, desktop 1920x1080) of the 3 new enhancements: per-course firing in POS, debt credit-limit warning, promo time-window scheduling, plus regressions. All three features work end-to-end. Found 1 HIGH data-loss bug in Admin > Клиенты (credit_limit not prefilled on edit -> silently reset to 0) and a few UX/minor issues. Backend skipped per request; state restored after testing (client debt 0, credit_limit 50, no open orders, seeded promo intact).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "admin/Clients.jsx edit modal", "issue": "Edit button builds form without credit_limit ({id,name,phone,discount_percent,loyalty_group_id}), so 'Лимит долга' shows 0 even when DB has 50, and save() sends credit_limit: Number(form.credit_limit || 0) -> any client edit silently wipes the credit limit. Verified live: DB=50, modal='0', after save DB=0.", "selector": "[data-testid=\"client-credit-limit-input\"]", "priority": "HIGH"},
+      {"component": "pos/Pos.jsx kitchen tickets modal", "issue": "tickets-close-btn calls backToTables() -> after firing a single course, closing the ticket modal exits the order and clears the cart; cashier must re-open the bill from the table to fire the next course. Breaks the intended per-course flow (other courses should stay editable in place).", "selector": "[data-testid=\"tickets-close-btn\"]", "priority": "MEDIUM"},
+      {"component": "components/admin/ui.jsx Modal", "issue": "Modal has no Escape/keyboard close handler; overlay (fixed inset-0 z-50) intercepts all clicks until X/overlay is clicked. Minor a11y/UX gap.", "selector": "[data-testid=\"modal-close\"]", "priority": "LOW"},
+      {"component": "pos/Pos.jsx item comment", "issue": "saveComment() only PUTs when store.orderId exists; on a brand-new unsaved order the comment (and the whole cart) lives only in local state, so leaving the order loses it. Observed: items+comment added on Стол 3 were not persisted server-side until send/pay.", "selector": "[data-testid=\"comment-save-btn\"]", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "POS kitchen ticket (seed data)", "issues": ["'Греческий салат' ticket prints to 'ЦЕХ: Бар' while burgers go to 'ЦЕХ: Кухня' — seeded printer/station routing for the Салаты category looks wrong (cosmetic/demo data)"]}
+    ]
+  },
+  "test_report_links": ["/app/test_reports/iteration_16.json"],
+  "action_items": [
+    "Fix Clients.jsx: include credit_limit (and keep other fields) when opening the edit modal — e.g. setForm({...c}) — otherwise every client edit resets 'Лимит долга' to 0 (unlimited).",
+    "Consider keeping the cashier inside the order after closing the kitchen-tickets modal following a per-course fire (don't call backToTables from tickets-close-btn).",
+    "Optional: persist the order (saveOrder) when a comment is added so comments on unsaved orders aren't lost; add Escape-to-close to the admin Modal."
+  ],
+  "critical_code_review_comments": [
+    "Clients.jsx line ~88: edit handler omits credit_limit -> combined with save() defaulting to 0 this is silent data loss on unrelated edits (HIGH).",
+    "Credit-limit enforcement is frontend-only by design; note that a POS client with a stale cached /clients?phone response could bypass the check — acceptable given warn+override design, but backend has no guard at all.",
+    "Pos.jsx is ~1066 lines; consider splitting cart/checkout/modals into sub-components per the 700-line guideline."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested (skipped per request)", "frontend": "92% (12/13 checks passed; 1 HIGH admin bug)"},
+  "seed_data_creation": "Temp promo 'TEST_Обед -20%' created and deleted; orders on Стол 1-4 created and paid (cash + debt); client 'Иван Петров' debt repaid and credit_limit restored to 50.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "Manager admin@resto.com/admin123; POS PIN 2222 (admin), 1111 (waiter) — all worked",
+  "context_for_next_testing_agent": "Verified PASS: (1) course grouping headers course-header-1/2 + fire-course-N; fire-course-1 sent ONLY course 1 (ticket 'Подача 1 / Греческий салат'), item badge 'отправлено', fire button disappears, course 2 still fireable; global send-kitchen-btn then fired only course 2. (2) Debt limit: client Иван Петров limit 50 — under-limit debt (8.10₽) paid with no modal; over-limit (projected 72.90 vs 50) opened debt-warn-modal with correct math, 'Отмена' aborted (checkout stayed open, no receipt), 'Всё равно провести' completed payment (backend debt = 72.90 verified). credit_limit=0 -> no warning. (3) Promo: seeded 'Счастливые часы −15%' shows 'все дни 15:00–18:00' and prefills 15:00/18:00 in edit modal; new promo with window 12:00–14:30 + weekdays Вт,Чт created, persisted after reload, deleted. Regressions OK: cash checkout, receipt modal, item comment rendering (cart-comment-0), course sorting. Test data cleaned up. Only open bug: Clients edit modal credit_limit prefill.",
+  "rca_of_the_issue": "Clients.jsx edit-client onClick constructs a partial form object that excludes credit_limit; save() then coerces the missing value with `Number(form.credit_limit || 0)` and PUTs credit_limit: 0, overwriting the stored limit. Repro: /admin/clients -> pencil on a client with limit 50 -> field shows 0 -> Сохранить -> GET /api/clients returns credit_limit 0. Fix: spread the client row into the form state."
+}

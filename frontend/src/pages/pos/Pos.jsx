@@ -49,6 +49,7 @@ export default function Pos() {
   const [commentFor, setCommentFor] = useState(null); // cart index
   const [commentText, setCommentText] = useState("");
   const [zReport, setZReport] = useState(null);
+  const [debtWarn, setDebtWarn] = useState(null);
 
   const toggleStop = async (p, e) => {
     e.stopPropagation();
@@ -127,6 +128,20 @@ export default function Pos() {
       store.loadCart(order.items, id, store.tableId, store.tableName);
       refetchTables();
       toast.success("Заказ отправлен на кухню");
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const fireCourse = async (courseNumber) => {
+    try {
+      const id = await saveOrder();
+      if (!id) return;
+      const { data } = await api.post(`/orders/${id}/send?course=${courseNumber}`);
+      setTickets(data.tickets && data.tickets.length ? data.tickets : null);
+      const { data: order } = await api.get(`/orders/${id}`);
+      store.loadCart(order.items, id, store.tableId, store.tableName);
+      refetchTables();
+      if (data.tickets && data.tickets.length) toast.success(`Подача ${courseNumber} отправлена на кухню`);
+      else toast(`В подаче ${courseNumber} нет новых позиций`);
     } catch (e) { toast.error(apiErr(e)); }
   };
 
@@ -260,7 +275,17 @@ export default function Pos() {
     } catch { setClient(null); }
   };
 
-  const doPay = async () => {
+  const payableTotal = () => {
+    const afterDisc = Math.max(0, subtotal - Number(discount || 0));
+    const maxPct = settings?.max_bonus_payment_percent ?? 50;
+    const cap = Math.round(afterDisc * maxPct) / 100;
+    const bonus = client ? Math.min(Number(bonusRedeem || 0), Number(client.bonus_balance || 0), cap) : 0;
+    const sc = scEnabled ? Math.round(subtotal * (settings?.service_charge_percent || 0)) / 100 : 0;
+    return Math.max(0, afterDisc - bonus + sc);
+  };
+
+  const executePay = async () => {
+    setDebtWarn(null);
     const id = await saveOrder();
     if (!id) return;
     try {
@@ -280,6 +305,18 @@ export default function Pos() {
       qc.invalidateQueries({ queryKey: ["dashboard"] });
       toast.success("Оплачено");
     } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const doPay = async () => {
+    const method = methods.find((m) => m.code === pay);
+    if (method?.is_debt && client && Number(client.credit_limit || 0) > 0) {
+      const projected = Number(client.debt_balance || 0) + payableTotal();
+      if (projected > Number(client.credit_limit)) {
+        setDebtWarn({ projected, limit: Number(client.credit_limit), name: client.name, current: Number(client.debt_balance || 0) });
+        return;
+      }
+    }
+    await executePay();
   };
 
   const backToTables = () => { store.clear(); setView("tables"); refetchTables(); };
@@ -317,6 +354,12 @@ export default function Pos() {
     const arr = store.cart.map((it, index) => ({ it, index }));
     arr.sort((a, b) => (a.it.course_number || 0) - (b.it.course_number || 0));
     return arr;
+  }, [store.cart]);
+
+  const courseHasPending = useMemo(() => {
+    const m = {};
+    store.cart.forEach((it) => { const c = it.course_number || 0; if (c && it.print_status !== "printed") m[c] = true; });
+    return m;
   }, [store.cart]);
 
   const subtotal = store.subtotal();
@@ -482,7 +525,17 @@ export default function Pos() {
                   prevCourse = cn;
                   return (
                     <div key={index}>
-                      {header && <div className="text-xs uppercase tracking-wider text-[#C084FC] font-bold px-1 pt-1" data-testid={`course-header-${header}`}>— Подача {header} —</div>}
+                      {header && (
+                        <div className="flex items-center justify-between px-1 pt-1" data-testid={`course-header-${header}`}>
+                          <span className="text-xs uppercase tracking-wider text-[#C084FC] font-bold">— Подача {header} —</span>
+                          {courseHasPending[header] && (
+                            <button onClick={() => fireCourse(header)} data-testid={`fire-course-${header}`}
+                              className="text-[11px] font-semibold px-2 py-1 rounded-md border border-[#00E5FF] text-[#00E5FF] hover:bg-[#00E5FF11] flex items-center gap-1 active:scale-95 transition-transform">
+                              <Send size={12} /> Отправить подачу
+                            </button>
+                          )}
+                        </div>
+                      )}
                       <div className="bg-[#1A1A1A] border border-[#27272A] rounded-lg p-3" data-testid={`cart-item-${index}`}>
                         <div className="flex justify-between items-start mb-2">
                           <span className="text-sm font-medium flex items-center gap-2">
@@ -712,7 +765,7 @@ export default function Pos() {
           <div className="w-full max-w-md bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()}>
             <div className="flex justify-between items-center mb-4">
               <h3 className="font-head text-xl font-bold flex items-center gap-2"><Printer size={20} /> Печать на цеха</h3>
-              <button onClick={() => { setTickets(null); backToTables(); }} data-testid="tickets-close-btn"><X size={20} className="text-[#A1A1AA]" /></button>
+              <button onClick={() => setTickets(null)} data-testid="tickets-close-btn"><X size={20} className="text-[#A1A1AA]" /></button>
             </div>
             <div className="space-y-4">
               {(tickets || []).map((tk, ti) => (
@@ -940,6 +993,25 @@ export default function Pos() {
       )}
 
       {zReportModal}
+
+      {/* Debt credit-limit warning (Долг — лимит) */}
+      {debtWarn && (
+        <div className="fixed inset-0 z-[65] bg-black/70 flex items-center justify-center p-4" onClick={() => setDebtWarn(null)}>
+          <div className="w-full max-w-sm bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()} data-testid="debt-warn-modal">
+            <div className="w-12 h-12 rounded-xl bg-[#FACC1511] text-[#FACC15] flex items-center justify-center mb-4"><AlertTriangle size={24} /></div>
+            <h3 className="font-head text-xl font-bold mb-2">Превышение лимита долга</h3>
+            <p className="text-sm text-[#A1A1AA] mb-4">
+              Клиент <span className="text-white font-semibold">{debtWarn.name}</span>. Текущий долг {money(debtWarn.current)}, после оплаты станет <span className="text-[#FF3B30] font-semibold">{money(debtWarn.projected)}</span> при лимите <span className="text-white">{money(debtWarn.limit)}</span>.
+            </p>
+            <div className="flex gap-3">
+              <button onClick={() => setDebtWarn(null)} data-testid="debt-warn-cancel-btn"
+                className="flex-1 bg-[#1A1A1A] border border-[#27272A] hover:border-[#A1A1AA] text-white rounded-lg py-3 font-semibold">Отмена</button>
+              <button onClick={executePay} data-testid="debt-warn-confirm-btn"
+                className="flex-1 bg-[#FACC15] hover:bg-[#eab308] text-black rounded-lg py-3 font-semibold">Всё равно провести</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Item comment modal (Задача 12) */}
       {commentFor !== null && (

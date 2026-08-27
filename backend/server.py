@@ -6,7 +6,7 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 import re
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Query
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, BeforeValidator, ConfigDict, field_validator, model_validator
@@ -346,6 +346,7 @@ class ClientReq(BaseModel):
     phone: str
     discount_percent: float = 0.0
     loyalty_group_id: Optional[str] = None
+    credit_limit: float = 0.0  # 0 = без лимита долга
 
 
 class RefundItemReq(BaseModel):
@@ -1296,12 +1297,14 @@ async def update_order(oid: str, req: OrderUpdateReq, user: dict = Depends(get_c
 
 
 @api.post("/orders/{oid}/send")
-async def send_order(oid: str, user: dict = Depends(get_current_user)):
+async def send_order(oid: str, course: Optional[int] = None, user: dict = Depends(get_current_user)):
     o = await db.orders.find_one({"_id": parse_oid(oid), "restaurant_id": user["restaurant_id"]})
     if not o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     items = o["items"]
-    pending_idx = [i for i, it in enumerate(items) if it.get("print_status", "pending") != "printed"]
+    pending_idx = [i for i, it in enumerate(items)
+                   if it.get("print_status", "pending") != "printed"
+                   and (course is None or (it.get("course_number") or 0) == course)]
     workshops = {w["id"]: w for w in await list_docs("workshops", rid=user["restaurant_id"])}
     groups = {}
     for i in pending_idx:
@@ -1907,10 +1910,10 @@ async def toggle_service_charge(oid: str, req: ToggleReq, user: dict = Depends(g
 
 # ----- Резервы и депозиты (Задача 11) -----
 @api.get("/reservations")
-async def get_reservations(date: Optional[str] = None, user: dict = Depends(get_current_user)):
+async def get_reservations(date_filter: Optional[str] = Query(None, alias="date"), user: dict = Depends(get_current_user)):
     q = {"restaurant_id": user["restaurant_id"]}
-    if date:
-        q["date"] = date
+    if date_filter:
+        q["date"] = date_filter
     docs = await db.reservations.find(q).sort("time_from", 1).to_list(2000)
     return [serialize(d) for d in docs]
 
@@ -3389,10 +3392,17 @@ async def seed():
     if await db.promotions.count_documents({"restaurant_id": default_rid}) == 0:
         await db.promotions.insert_one({
             "name": "Счастливые часы −15%", "active": True, "weekdays": [],
-            "time_from": "14:00", "time_to": "17:00", "date_from": None, "date_to": None,
+            "time_from": "15:00", "time_to": "18:00", "date_from": None, "date_to": None,
             "condition_items": [], "result_type": "discount_percent", "result_value": 15.0,
             "result_product_id": None, "auto_apply": True, "stackable": False,
             "restaurant_id": default_rid, "created_at": iso(now_utc())})
+    # окно демо-акции «Счастливые часы» → 15:00–18:00 (Расписание акций)
+    await db.promotions.update_many(
+        {"restaurant_id": default_rid, "name": "Счастливые часы −15%", "time_from": "14:00"},
+        {"$set": {"time_from": "15:00", "time_to": "18:00"}})
+    # лимит долга по умолчанию (0 = без лимита)
+    await db.clients.update_many(
+        {"restaurant_id": default_rid, "credit_limit": {"$exists": False}}, {"$set": {"credit_limit": 0.0}})
 
     # settings: дефолтный лимит оплаты бонусами
     await db.settings.update_one(
