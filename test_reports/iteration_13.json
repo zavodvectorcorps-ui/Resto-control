@@ -1,0 +1,65 @@
+{
+  "summary": "Phase 3 (Tasks 9,10,11,13) e2e test. Backend: new pytest suite test_phase3_iter13.py — 15/15 pass (refund partial/full + status transitions + role gating + refunds report with date filter; service charge PUT/GET/per-order PATCH and pay math (3.00 -> 3.30 @10%); reservations CRUD + date filter + link-reservation deposit subtracted on pay; stop list CRUD + products is_available + cleared on new shift). Edge suite test_phase3_edge_iter13.py exposed 3 validation gaps. Frontend: found and fixed a CRITICAL crash that made the whole /pos screen unusable (TDZ ReferenceError), then verified stop toggle/dimming/blocking toast, checkout service-charge toggle + pay-total, payment; /admin/loyalty SC settings persist; /admin/reports 'Возвраты' tab; /admin/reservations create/status/date-filter/delete. All test data cleaned up and service_charge_default_enabled reset to false.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/orders/{id}/link-reservation", "issue": "No existence check on the order: linking a non-existent order id returns 200 {success:true} and still marks the reservation 'seated' with order_id set to the bogus id (prepaid silently lost). Should 404 when the order is missing (and ideally reject non-open orders)."},
+      {"endpoint": "PATCH /api/reservations/{id}", "issue": "status accepts any arbitrary string (e.g. 'banana' -> 200). Frontend only renders pending/seated/cancelled/done, so bad data breaks the status select colour/label. Add an enum validator."},
+      {"endpoint": "POST /api/orders/{id}/refund", "issue": "items=[] with reason='' is accepted and creates a 0 ₽ refund record that shows up in /api/reports/refunds. Require at least one item and a non-empty reason."},
+      {"endpoint": "PUT /api/settings/service-charge, GET /api/settings", "issue": "Settings doc is keyed only by {key:'venue'} with no restaurant_id — service_charge_percent/default are shared across tenants (pre-existing pattern, but new Task 10 fields inherit the leak)."},
+      {"endpoint": "GET/POST/PATCH/DELETE /api/reservations, /api/pos/stop-list", "issue": "Only get_current_user — a waiter can create/patch/delete reservations (incl. deposits) and edit the stop list. Confirm whether this is intended; if not, gate with require_roles."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "pages/pos/Pos.jsx", "issue": "CRITICAL (FIXED BY TESTER): `useEffect(... , [settings])` for the service-charge default was placed on line 44, before `const { data: settings } = useQuery(...)` on line 60 -> ReferenceError 'Cannot access settings before initialization' on every render. The entire POS screen (cashier/waiter workstation) rendered a blank page / red runtime-error overlay. Fixed by moving the useEffect below the settings query; POS verified working afterwards. Please keep this ordering.", "selector": "/pos", "priority": "CRITICAL"},
+      {"component": "Reservations modal", "issue": "No client-side validation: submitting an empty form fires a 422 and shows the raw, non-localized toast 'Field required Field required' in an otherwise Russian UI.", "selector": "[data-testid=\"save-reservation-btn\"]", "priority": "MEDIUM"},
+      {"component": "Reservations modal", "issue": "'Время до' (time_to) has no input even though the backend model and the list rendering (`time_from–time_to`) support it.", "selector": "[data-testid=\"reservation-timefrom-input\"]", "priority": "LOW"},
+      {"component": "Reservations list", "issue": "Delete button removes a reservation (with deposit) immediately, with no confirmation dialog and no success toast.", "selector": "[data-testid^=\"del-reservation-\"]", "priority": "LOW"}
+    ],
+    "integration_issues": [
+      {"flow": "POS checkout receipt", "issue": "Receipt/print shows items 3.00 then ИТОГО 3.30 with no 'Сервисный сбор 10%' line (same for reservation prepaid_amount) — the guest cannot see why the total differs from the item sum.", "affected_selectors": ["[data-testid=\"pay-total\"]", "receipt modal"]}
+    ],
+    "design_issues": [
+      {"screen": "/admin/reservations and /admin/reports date pickers", "issues": ["Native browser <input type=date> is used instead of the shadcn calendar component used elsewhere in the design system"]},
+      {"screen": "POS product card", "issues": ["Stop toggle is a <span> nested inside the product <button> — it works via stopPropagation but is not keyboard/a11y reachable and has no title/aria-label ('⊘' glyph only)"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase3_iter13.py",
+    "/app/backend/tests/test_phase3_edge_iter13.py",
+    "/app/backend/tests/cleanup_iter13.py",
+    "/app/backend/tests/cleanup_iter13_orders.py",
+    "/app/test_reports/pytest/phase3_iter13.xml"
+  ],
+  "action_items": [
+    "Do NOT regress the Pos.jsx hook ordering fix (useEffect must come after the settings useQuery) — it was a hard crash of the whole POS page.",
+    "link-reservation: 404 when the order does not exist; do not mark the reservation seated in that case.",
+    "Validate reservation status against pending/seated/cancelled/done (Pydantic enum).",
+    "Reject refunds with no items / empty reason (400) so 0 ₽ rows stop appearing in the refunds report.",
+    "Add client-side validation + localized errors to the reservation create modal; add a 'Время до' field and a delete confirmation.",
+    "Show a 'Сервисный сбор X%' (and 'Предоплата/депозит') line on the receipt and precheck.",
+    "Decide role gating for /api/reservations and /api/pos/stop-list (waiter currently has full write access).",
+    "Consider scoping the settings document by restaurant_id (service charge is currently global across tenants)."
+  ],
+  "critical_code_review_comments": [
+    "Pos.jsx: hooks referencing a value declared later in the component body throw a TDZ ReferenceError at render — always declare queries before effects that depend on them; this pattern should be caught by a lint rule (no-use-before-define) since it took the whole cashier screen down.",
+    "server.py refund_order silently clamps qty to it['count'] but does not track already-refunded quantities per item index, so the same item can be refunded repeatedly (total_refunded only gates the 'refunded' status flag, not the amount) — a cashier can refund more money than the order total.",
+    "server.py link_reservation takes a raw dict body instead of a Pydantic model and does not validate the order exists or is open.",
+    "settings collection is not multi-tenant scoped ({key:'venue'} only)."
+  ],
+  "updated_files": [
+    "/app/frontend/src/pages/pos/Pos.jsx",
+    "/app/backend/tests/test_phase3_iter13.py",
+    "/app/backend/tests/test_phase3_edge_iter13.py",
+    "/app/backend/tests/cleanup_iter13.py",
+    "/app/backend/tests/cleanup_iter13_orders.py"
+  ],
+  "success_rate": {"backend": "100% (15/15 feature tests); 3 of 4 edge/validation checks failed", "frontend": "100% after fixing the POS crash (0% before — POS was completely unusable)"},
+  "seed_data_creation": "Temporary: TEST_ reservations, test orders (paid), 3 refunds, stop-list entries. All removed afterwards — refunds report empty, reservations empty, stop-list empty, service_charge_percent=10 / default_enabled=false. A shift remains open (needed for POS demo). Note: cleanup_iter13_orders.py deleted 107 closed orders created within the last 45 min (all pytest/UI artifacts, incl. earlier iterations'); 210 demo orders remain.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "manager admin@resto.com/admin123; admin PIN 2222; waiter PIN 1111 (from /app/memory/test_credentials.md)",
+  "context_for_next_testing_agent": "Run the phase-3 suites serially: `python -m pytest tests/test_phase3_iter13.py -n 0`. The class order matters (TestStopList closes/reopens the shift). After testing, run tests/cleanup_iter13.py (removes TEST refunds/corrections/reservations, clears stop list, resets service charge to 10%/off). Login helpers: manager tab is 'Менеджер' and the email/password fields are prefilled — just click 'Войти'. POS login = click digits 2222 on the PIN pad. Products in 'Бургеры' all have modifier groups (a picker opens); use the 'Напитки' category for simple add-to-cart flows.",
+  "rca_of_the_issue": "POS blank screen: in Pos.jsx the service-charge default useEffect was inserted immediately after the useState declarations, but its dependency array `[settings]` is evaluated during render while `const settings` (react-query) is declared ~16 lines later — a const TDZ access -> 'Cannot access settings before initialization' thrown on first render, unmounting the whole <Pos> tree (React error overlay, empty body). Reproduced by logging in with PIN 2222 and observing the pageerror. Fix applied: move the useEffect after the settings useQuery declaration; POS then rendered and the full stop-list + service-charge + payment flow passed."
+}

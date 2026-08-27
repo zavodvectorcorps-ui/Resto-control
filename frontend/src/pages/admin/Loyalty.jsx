@@ -19,7 +19,13 @@ export default function Loyalty() {
   const [pModal, setPModal] = useState(false);
   const [pForm, setPForm] = useState({});
   const [maxBonus, setMaxBonus] = useState(50);
-  useEffect(() => { if (settings?.max_bonus_payment_percent != null) setMaxBonus(settings.max_bonus_payment_percent); }, [settings]);
+  const [scPct, setScPct] = useState(0);
+  const [scDefault, setScDefault] = useState(false);
+  useEffect(() => {
+    if (settings?.max_bonus_payment_percent != null) setMaxBonus(settings.max_bonus_payment_percent);
+    if (settings?.service_charge_percent != null) setScPct(settings.service_charge_percent);
+    if (settings?.service_charge_default_enabled != null) setScDefault(settings.service_charge_default_enabled);
+  }, [settings]);
 
   const refresh = (k) => qc.invalidateQueries({ queryKey: [k] });
 
@@ -48,6 +54,10 @@ export default function Loyalty() {
 
   const saveMaxBonus = async () => {
     try { await api.put("/settings/receipt", { max_bonus_payment_percent: Number(maxBonus) }); toast.success("Лимит сохранён"); refresh("settings"); }
+    catch (e) { toast.error(apiErr(e)); }
+  };
+  const saveServiceCharge = async () => {
+    try { await api.put("/settings/service-charge", { service_charge_percent: Number(scPct), service_charge_default_enabled: scDefault }); toast.success("Сервисный сбор сохранён"); refresh("settings"); }
     catch (e) { toast.error(apiErr(e)); }
   };
   const toggleWd = (d) => setPForm((f) => { const w = f.weekdays || []; return { ...f, weekdays: w.includes(d) ? w.filter((x) => x !== d) : [...w, d] }; });
@@ -114,9 +124,20 @@ export default function Loyalty() {
       )}
 
       {tab === "settings" && (
-        <div className="max-w-md bg-[#121212] border border-[#27272A] rounded-xl p-6 space-y-4">
-          <Field label="Макс. оплата бонусами (% от чека)" type="number" value={maxBonus} onChange={(e) => setMaxBonus(e.target.value)} data-testid="max-bonus-input" />
-          <Btn onClick={saveMaxBonus} data-testid="save-max-bonus-btn">Сохранить лимит</Btn>
+        <div className="max-w-md space-y-6">
+          <div className="bg-[#121212] border border-[#27272A] rounded-xl p-6 space-y-4">
+            <Field label="Макс. оплата бонусами (% от чека)" type="number" value={maxBonus} onChange={(e) => setMaxBonus(e.target.value)} data-testid="max-bonus-input" />
+            <Btn onClick={saveMaxBonus} data-testid="save-max-bonus-btn">Сохранить лимит</Btn>
+          </div>
+          <div className="bg-[#121212] border border-[#27272A] rounded-xl p-6 space-y-4">
+            <h3 className="font-head font-bold">Сервисный сбор</h3>
+            <Field label="Процент, %" type="number" value={scPct} onChange={(e) => setScPct(e.target.value)} data-testid="sc-percent-input" />
+            <label className="flex items-center gap-2 text-sm text-[#A1A1AA] cursor-pointer">
+              <input type="checkbox" checked={scDefault} onChange={(e) => setScDefault(e.target.checked)} className="accent-[#FF5A00] w-4 h-4" data-testid="sc-default-check" />
+              Включать по умолчанию на новых заказах
+            </label>
+            <Btn onClick={saveServiceCharge} data-testid="save-sc-btn">Сохранить сервисный сбор</Btn>
+          </div>
         </div>
       )}
 

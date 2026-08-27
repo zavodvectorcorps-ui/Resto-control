@@ -68,6 +68,7 @@ export default function Menu() {
         recipe: (form.recipe || []).map((r) => ({ inventory_id: r.inventory_id, name: r.name, amount: Number(r.amount), unit: r.unit || null, processing_method: r.processing_method || null })),
         modifier_group_ids: form.modifier_group_ids || [],
         preparation_notes: form.preparation_notes || "",
+        course_number: (form.course_number === "" || form.course_number == null) ? null : Number(form.course_number),
       };
       if (editing) await api.put(`/products/${editing.id}`, body);
       else await api.post("/products", body);
@@ -85,14 +86,20 @@ export default function Menu() {
 
   // categories inline
   const [catForm, setCatForm] = useState("");
+  const [catCourse, setCatCourse] = useState(0);
   const addCat = async () => {
     if (!catForm.trim()) return;
-    await api.post("/categories", { name: catForm, position: categories.length + 1 });
-    setCatForm("");
+    await api.post("/categories", { name: catForm, position: categories.length + 1, course_number: Number(catCourse || 0) });
+    setCatForm(""); setCatCourse(0);
     qc.invalidateQueries({ queryKey: ["categories"] });
   };
   const delCat = async (id) => {
     await api.delete(`/categories/${id}`);
+    qc.invalidateQueries({ queryKey: ["categories"] });
+  };
+  const updateCatCourse = async (c, course) => {
+    await api.put(`/categories/${c.id}`, { name: c.name, color: c.color || "#FF5A00", position: c.position || 0, course_number: Number(course || 0) });
+    toast.success("Курс подачи сохранён");
     qc.invalidateQueries({ queryKey: ["categories"] });
   };
 
@@ -149,17 +156,26 @@ export default function Menu() {
 
       {tab === "categories" && (
         <div className="max-w-lg">
-          <div className="flex gap-2 mb-4">
+          <div className="flex gap-2 mb-2">
             <input value={catForm} onChange={(e) => setCatForm(e.target.value)} placeholder="Новая категория"
               data-testid="cat-input"
               className="flex-1 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 focus:border-[#FF5A00] outline-none" />
+            <input type="number" min="0" value={catCourse} onChange={(e) => setCatCourse(e.target.value)} placeholder="Курс" title="Курс подачи" data-testid="cat-course-input"
+              className="w-20 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-3 py-2.5 focus:border-[#FF5A00] outline-none" />
             <Btn onClick={addCat} data-testid="add-cat-btn"><Plus size={16} /></Btn>
           </div>
+          <p className="text-xs text-[#52525B] mb-4">Курс подачи: 0 — без порядка, 1 — первым, 2 — вторым и т.д. Печатается и группируется в заказе.</p>
           <div className="space-y-2">
             {categories.map((c) => (
               <div key={c.id} className="flex items-center justify-between bg-[#121212] border border-[#27272A] rounded-lg px-4 py-3">
                 <span>{c.name}</span>
-                <button onClick={() => delCat(c.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-cat-${c.id}`}><Trash2 size={16} /></button>
+                <div className="flex items-center gap-3">
+                  <label className="text-xs text-[#A1A1AA] flex items-center gap-1">Курс
+                    <input type="number" min="0" defaultValue={c.course_number || 0} onBlur={(e) => updateCatCourse(c, e.target.value)} data-testid={`cat-course-${c.id}`}
+                      className="w-16 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-2 py-1.5 text-sm outline-none focus:border-[#FF5A00]" />
+                  </label>
+                  <button onClick={() => delCat(c.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-cat-${c.id}`}><Trash2 size={16} /></button>
+                </div>
               </div>
             ))}
           </div>
@@ -194,6 +210,12 @@ export default function Menu() {
             options={workshops.map((w) => ({ value: w.id, label: w.name }))} />
           <SelectField label="Ед. измерения" value={form.measure || "pcs"} onChange={(e) => setForm({ ...form, measure: e.target.value })}
             options={[{ value: "pcs", label: "шт" }, { value: "kg", label: "кг" }, { value: "l", label: "л" }]} />
+          <div>
+            <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA]">Курс подачи (пусто = как в категории)</label>
+            <input type="number" min="0" value={form.course_number ?? ""} onChange={(e) => setForm({ ...form, course_number: e.target.value })} data-testid="product-course-input"
+              placeholder="как в категории"
+              className="w-full mt-1 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 outline-none focus:border-[#FF5A00]" />
+          </div>
           <div className="border-t border-[#27272A] pt-4">
             <div className="flex items-center justify-between mb-2">
               <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA]">Тех.карта (авто-списание)</label>

@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import api, { apiErr } from "@/lib/api";
@@ -8,7 +8,7 @@ import { toast } from "sonner";
 import {
   ChefHat, LogOut, Plus, Minus, Trash2, Send, CreditCard, Grid3x3,
   ArrowLeft, Power, Printer, Banknote, X, Utensils,
-  Receipt, ArrowRightLeft, Scissors, Check, AlertTriangle,
+  Receipt, ArrowRightLeft, Scissors, Check, AlertTriangle, MessageSquare, Wallet,
 } from "lucide-react";
 
 const money = (n) => `${Number(n || 0).toFixed(2)} ₽`;
@@ -40,6 +40,23 @@ export default function Pos() {
   const [client, setClient] = useState(null);
   const [discountSource, setDiscountSource] = useState(null);
   const [bonusRedeem, setBonusRedeem] = useState("");
+  const [scEnabled, setScEnabled] = useState(false);
+  const [cashMove, setCashMove] = useState(null); // { type }
+  const [cashAmt, setCashAmt] = useState("");
+  const [cashReason, setCashReason] = useState("");
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState("");
+  const [commentFor, setCommentFor] = useState(null); // cart index
+  const [commentText, setCommentText] = useState("");
+
+  const toggleStop = async (p, e) => {
+    e.stopPropagation();
+    try {
+      if (p.is_available) await api.post(`/pos/stop-list/${p.id}`);
+      else await api.delete(`/pos/stop-list/${p.id}`);
+      qc.invalidateQueries({ queryKey: ["products"] });
+    } catch (err) { toast.error(apiErr(err)); }
+  };
 
   const { data: shift, refetch: refetchShift } = useQuery({ queryKey: ["shift"], queryFn: async () => (await api.get("/shifts/current")).data });
   const { data: tables = [], refetch: refetchTables } = useQuery({ queryKey: ["pos-tables"], queryFn: async () => (await api.get("/tables")).data });
@@ -47,6 +64,9 @@ export default function Pos() {
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: async () => (await api.get("/products")).data });
   const { data: modGroups = [] } = useQuery({ queryKey: ["modifier-groups"], queryFn: async () => (await api.get("/modifier-groups")).data });
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: async () => (await api.get("/settings")).data });
+  const { data: methods = [] } = useQuery({ queryKey: ["payment-methods"], queryFn: async () => (await api.get("/payment-methods")).data });
+  const { data: quickComments = [] } = useQuery({ queryKey: ["quick-comments"], queryFn: async () => (await api.get("/quick-comments")).data });
+  useEffect(() => { if (settings?.service_charge_default_enabled != null) setScEnabled(settings.service_charge_default_enabled); }, [settings]);
 
   const cat = activeCat || categories[0]?.id;
   const shownProducts = useMemo(
@@ -188,6 +208,7 @@ export default function Pos() {
   };
 
   const onProductClick = (p) => {
+    if (p.is_available === false) { toast.error(`«${p.name}» в стоп-листе`); return; }
     const groups = modGroups.filter((g) => (p.modifier_group_ids || []).includes(g.id));
     if (groups.length) { setModSel({}); setModPicker({ product: p, groups }); return; }
     store.addItem(p);
@@ -239,6 +260,7 @@ export default function Pos() {
     const id = await saveOrder();
     if (!id) return;
     try {
+      await api.patch(`/orders/${id}/service-charge`, { enabled: scEnabled });
       const { data } = await api.post(`/orders/${id}/pay`, {
         payment_method: pay, discount: Number(discount),
         client_id: client?.id || null,
@@ -257,6 +279,41 @@ export default function Pos() {
   };
 
   const backToTables = () => { store.clear(); setView("tables"); refetchTables(); };
+
+  const doCashMove = async () => {
+    if (!(Number(cashAmt) > 0)) { toast.error("Введите сумму больше 0"); return; }
+    try {
+      await api.post("/shifts/cash-movement", { type: cashMove.type, amount: Number(cashAmt), reason: cashReason });
+      toast.success(cashMove.type === "in" ? "Внесение записано" : "Изъятие записано");
+      setCashMove(null); setCashAmt(""); setCashReason("");
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const cancelOrder = async () => {
+    if (!store.orderId) { setCancelOpen(false); backToTables(); return; }
+    try {
+      await api.delete(`/orders/${store.orderId}`, { data: { reason: cancelReason.trim() } });
+      toast.success("Заказ отменён");
+      setCancelOpen(false); setCancelReason("");
+      backToTables();
+    } catch (e) { toast.error(apiErr(e)); }
+  };
+
+  const openComment = (index) => { setCommentText(store.cart[index]?.comment || ""); setCommentFor(index); };
+  const saveComment = async () => {
+    const idx = commentFor;
+    const text = commentText.trim();
+    store.setComment(idx, text);
+    const items = store.cart.map((c, i) => (i === idx ? { ...c, comment: text || null } : c));
+    setCommentFor(null); setCommentText("");
+    if (store.orderId) { try { await api.put(`/orders/${store.orderId}`, { items }); refetchTables(); } catch (e) { toast.error(apiErr(e)); } }
+  };
+
+  const cartOrdered = useMemo(() => {
+    const arr = store.cart.map((it, index) => ({ it, index }));
+    arr.sort((a, b) => (a.it.course_number || 0) - (b.it.course_number || 0));
+    return arr;
+  }, [store.cart]);
 
   const subtotal = store.subtotal();
   const canPay = user.role === "admin";
@@ -289,7 +346,7 @@ export default function Pos() {
 
   return (
     <div className="h-screen flex flex-col bg-[#0A0A0A] overflow-hidden">
-      <PosTopBar user={user} shift={shift} onLogout={() => { logout(); nav("/login"); }} onCloseShift={closeShift} />
+      <PosTopBar user={user} shift={shift} onLogout={() => { logout(); nav("/login"); }} onCloseShift={closeShift} onCash={() => { setCashAmt(""); setCashReason(""); setCashMove({ type: "in" }); }} />
 
       {view === "tables" ? (
         <div className="flex-1 overflow-y-auto p-8">
@@ -338,7 +395,11 @@ export default function Pos() {
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
               {shownProducts.map((p) => (
                 <button key={p.id} onClick={() => onProductClick(p)} data-testid={`pos-product-${p.id}`}
-                  className="bg-[#1A1A1A] border border-[#27272A] rounded-lg p-4 flex flex-col items-start gap-2 hover:border-[#FF5A00] active:scale-95 transition-all text-left min-h-[100px]">
+                  className={`relative bg-[#1A1A1A] border border-[#27272A] rounded-lg p-4 flex flex-col items-start gap-2 hover:border-[#FF5A00] active:scale-95 transition-all text-left min-h-[100px] ${p.is_available === false ? "opacity-40" : ""}`}>
+                  <span onClick={(e) => toggleStop(p, e)} data-testid={`stop-toggle-${p.id}`}
+                    className={`absolute top-1.5 right-1.5 text-[9px] px-1.5 py-0.5 rounded font-bold ${p.is_available === false ? "bg-[#FF3B30] text-white" : "bg-[#27272A] text-[#52525B] hover:text-white"}`}>
+                    {p.is_available === false ? "СТОП" : "⊘"}
+                  </span>
                   <Utensils size={16} className="text-[#52525B]" />
                   <span className="font-medium text-sm leading-tight">{p.name}</span>
                   {(p.modifier_group_ids || []).length > 0 && <span className="text-[9px] px-1.5 py-0.5 rounded bg-[#A855F711] text-[#A855F7] font-semibold">модификаторы</span>}
@@ -356,44 +417,59 @@ export default function Pos() {
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-2">
               {store.cart.length === 0 && <p className="text-[#52525B] text-sm text-center mt-8">Добавьте позиции из меню</p>}
-              {store.cart.map((it, index) => {
-                const printed = it.print_status === "printed";
-                return (
-                  <div key={index} className="bg-[#1A1A1A] border border-[#27272A] rounded-lg p-3" data-testid={`cart-item-${index}`}>
-                    <div className="flex justify-between items-start mb-2">
-                      <span className="text-sm font-medium flex items-center gap-2">
-                        {it.name}
-                        {printed && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#00E5FF11] text-[#00E5FF] font-semibold">отправлено</span>}
-                      </span>
-                      <button onClick={() => requestVoid(index, it)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`void-${index}`} title={printed ? "Сторно" : "Удалить"}><Trash2 size={14} /></button>
-                    </div>
-                    {(it.selected_modifiers || []).length > 0 && (
-                      <div className="mb-2 pl-2 border-l-2 border-[#27272A] space-y-0.5" data-testid={`cart-mods-${index}`}>
-                        {(it.selected_modifiers || []).map((m, mi) => (
-                          <div key={mi} className="text-[11px] text-[#A1A1AA] flex justify-between">
-                            <span>+ {m.name}</span>
-                            {m.price_delta ? <span className="tabnum text-[#52525B]">+{money(m.price_delta)}</span> : null}
+              {(() => {
+                let prevCourse = null;
+                return cartOrdered.map(({ it, index }) => {
+                  const printed = it.print_status === "printed";
+                  const cn = it.course_number || 0;
+                  const header = cn && cn !== prevCourse ? cn : null;
+                  prevCourse = cn;
+                  return (
+                    <div key={index}>
+                      {header && <div className="text-xs uppercase tracking-wider text-[#C084FC] font-bold px-1 pt-1" data-testid={`course-header-${header}`}>— Подача {header} —</div>}
+                      <div className="bg-[#1A1A1A] border border-[#27272A] rounded-lg p-3" data-testid={`cart-item-${index}`}>
+                        <div className="flex justify-between items-start mb-2">
+                          <span className="text-sm font-medium flex items-center gap-2">
+                            {it.name}
+                            {printed && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#00E5FF11] text-[#00E5FF] font-semibold">отправлено</span>}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => openComment(index)} className="text-[#A1A1AA] hover:text-[#A855F7]" data-testid={`comment-${index}`} title="Комментарий"><MessageSquare size={14} /></button>
+                            <button onClick={() => requestVoid(index, it)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`void-${index}`} title={printed ? "Сторно" : "Удалить"}><Trash2 size={14} /></button>
                           </div>
-                        ))}
-                      </div>
-                    )}
-                    <div className="flex justify-between items-center">
-                      {printed ? (
-                        <span className="text-sm text-[#A1A1AA] tabnum">× {it.count}</span>
-                      ) : (
-                        <div className="flex items-center gap-2">
-                          <button onClick={() => store.changeCount(index, -1)} data-testid={`dec-${index}`}
-                            className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Minus size={14} /></button>
-                          <span className="w-6 text-center tabnum">{it.count}</span>
-                          <button onClick={() => store.changeCount(index, 1)} data-testid={`inc-${index}`}
-                            className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Plus size={14} /></button>
                         </div>
-                      )}
-                      <span className="tabnum font-semibold text-[#FF5A00]">{money((it.price + (it.selected_modifiers || []).reduce((a, m) => a + (m.price_delta || 0), 0)) * it.count)}</span>
+                        {(it.selected_modifiers || []).length > 0 && (
+                          <div className="mb-2 pl-2 border-l-2 border-[#27272A] space-y-0.5" data-testid={`cart-mods-${index}`}>
+                            {(it.selected_modifiers || []).map((m, mi) => (
+                              <div key={mi} className="text-[11px] text-[#A1A1AA] flex justify-between">
+                                <span>+ {m.name}</span>
+                                {m.price_delta ? <span className="tabnum text-[#52525B]">+{money(m.price_delta)}</span> : null}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {it.comment && (
+                          <div className="mb-2 text-xs text-[#C084FC] bg-[#C084FC11] rounded px-2 py-1 italic" data-testid={`cart-comment-${index}`}>✎ {it.comment}</div>
+                        )}
+                        <div className="flex justify-between items-center">
+                          {printed ? (
+                            <span className="text-sm text-[#A1A1AA] tabnum">× {it.count}</span>
+                          ) : (
+                            <div className="flex items-center gap-2">
+                              <button onClick={() => store.changeCount(index, -1)} data-testid={`dec-${index}`}
+                                className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Minus size={14} /></button>
+                              <span className="w-6 text-center tabnum">{it.count}</span>
+                              <button onClick={() => store.changeCount(index, 1)} data-testid={`inc-${index}`}
+                                className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Plus size={14} /></button>
+                            </div>
+                          )}
+                          <span className="tabnum font-semibold text-[#FF5A00]">{money((it.price + (it.selected_modifiers || []).reduce((a, m) => a + (m.price_delta || 0), 0)) * it.count)}</span>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                });
+              })()}
             </div>
             <div className="border-t border-[#27272A] p-4 space-y-3">
               <div className="flex justify-between text-lg font-head font-bold">
@@ -414,6 +490,12 @@ export default function Pos() {
                   <Scissors size={16} /> Разделить
                 </button>
               </div>
+              {store.orderId && (
+                <button onClick={() => { setCancelReason(""); setCancelOpen(true); }} data-testid="cancel-order-btn"
+                  className="w-full bg-[#1A1A1A] border border-[#27272A] hover:border-[#FF3B30] text-[#FF3B30] rounded-lg py-2 text-xs font-semibold active:scale-95 transition-transform flex items-center justify-center gap-2">
+                  <X size={14} /> Отменить заказ
+                </button>
+              )}
               <button onClick={sendKitchen} disabled={store.cart.length === 0} data-testid="send-kitchen-btn"
                 className="w-full bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E5FF] text-[#00E5FF] rounded-lg py-3 font-semibold active:scale-95 transition-transform disabled:opacity-40 flex items-center justify-center gap-2">
                 <Send size={18} /> Отправить на кухню
@@ -469,16 +551,31 @@ export default function Pos() {
                   </p>
                 )}
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <button onClick={() => setPay("cash")} data-testid="pay-cash"
-                  className={`rounded-lg py-4 flex flex-col items-center gap-2 border ${pay === "cash" ? "border-[#00E676] bg-[#00E67611] text-[#00E676]" : "border-[#27272A] text-[#A1A1AA]"}`}>
-                  <Banknote size={22} /> Наличные
-                </button>
-                <button onClick={() => setPay("card")} data-testid="pay-card"
-                  className={`rounded-lg py-4 flex flex-col items-center gap-2 border ${pay === "card" ? "border-[#00E5FF] bg-[#00E5FF11] text-[#00E5FF]" : "border-[#27272A] text-[#A1A1AA]"}`}>
-                  <CreditCard size={22} /> Карта
-                </button>
+              {Number(settings?.service_charge_percent) > 0 && (
+                <label className="flex items-center justify-between bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-3 cursor-pointer" data-testid="sc-toggle-row">
+                  <span className="text-sm">Сервисный сбор {settings.service_charge_percent}%</span>
+                  <input type="checkbox" checked={scEnabled} onChange={(e) => setScEnabled(e.target.checked)} className="accent-[#FF5A00] w-4 h-4" data-testid="sc-toggle" />
+                </label>
+              )}
+              <div className="grid grid-cols-2 gap-3" data-testid="payment-methods">
+                {methods.filter((m) => m.active).map((m) => {
+                  const debtDisabled = m.is_debt && !client;
+                  const Icon = m.code === "cash" ? Banknote : m.is_debt ? Wallet : CreditCard;
+                  const active = pay === m.code;
+                  const accent = m.is_debt ? "#FF3B30" : m.code === "card" ? "#00E5FF" : "#00E676";
+                  return (
+                    <button key={m.id} data-testid={`pay-${m.code}`} disabled={debtDisabled}
+                      onClick={() => { if (debtDisabled) { toast.error("Для оплаты в долг выберите клиента"); return; } setPay(m.code); }}
+                      className={`rounded-lg py-4 flex flex-col items-center gap-2 border text-sm ${active ? "text-white" : "text-[#A1A1AA] border-[#27272A]"} ${debtDisabled ? "opacity-40 cursor-not-allowed" : ""}`}
+                      style={active ? { borderColor: accent, backgroundColor: accent + "11", color: accent } : {}}>
+                      <Icon size={22} /> {m.name}
+                    </button>
+                  );
+                })}
               </div>
+              {methods.find((m) => m.code === pay)?.is_debt && (
+                <p className="text-xs text-[#FF3B30] -mt-1" data-testid="debt-hint">Сумма будет записана в долг клиента {client?.name || ""}</p>
+              )}
               <div className="flex justify-between text-2xl font-head font-extrabold pt-2 border-t border-[#27272A]">
                 <span>К оплате</span>
                 <span className="tabnum text-[#FF5A00]" data-testid="pay-total">{(() => {
@@ -486,7 +583,8 @@ export default function Pos() {
                   const maxPct = settings?.max_bonus_payment_percent ?? 50;
                   const cap = Math.round(afterDisc * maxPct) / 100;
                   const bonus = client ? Math.min(Number(bonusRedeem || 0), Number(client.bonus_balance || 0), cap) : 0;
-                  return money(Math.max(0, afterDisc - bonus));
+                  const sc = scEnabled ? Math.round(subtotal * (settings?.service_charge_percent || 0)) / 100 : 0;
+                  return money(Math.max(0, afterDisc - bonus + sc));
                 })()}</span>
               </div>
               {client && Number(bonusRedeem) > 0 && (() => {
@@ -561,14 +659,27 @@ export default function Pos() {
               <button onClick={() => { setTickets(null); backToTables(); }} data-testid="tickets-close-btn"><X size={20} className="text-[#A1A1AA]" /></button>
             </div>
             <div className="space-y-4">
-              {Object.entries(tickets).map(([ws, items]) => (
-                <div key={ws} className="bg-white text-black rounded-lg p-4 font-mono text-sm">
-                  <div className="font-bold border-b border-dashed border-black pb-1 mb-2">ЦЕХ: {ws}</div>
-                  {items.map((it, i) => (
-                    <div key={i} className="flex justify-between"><span>{it.name}</span><span>×{it.count}</span></div>
-                  ))}
-                </div>
-              ))}
+              {Object.entries(tickets).map(([ws, items]) => {
+                const ordered = [...items].sort((a, b) => (a.course_number || 0) - (b.course_number || 0));
+                let prev = null;
+                return (
+                  <div key={ws} className="bg-white text-black rounded-lg p-4 font-mono text-sm">
+                    <div className="font-bold border-b border-dashed border-black pb-1 mb-2">ЦЕХ: {ws}</div>
+                    {ordered.map((it, i) => {
+                      const cn = it.course_number || 0;
+                      const header = cn && cn !== prev ? cn : null;
+                      prev = cn;
+                      return (
+                        <div key={i}>
+                          {header && <div className="font-bold text-center my-1">-- Подача {header} --</div>}
+                          <div className="flex justify-between"><span>{it.name}</span><span>×{it.count}</span></div>
+                          {it.comment && <div className="pl-3 text-[13px] italic">* {it.comment}</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
               <button onClick={() => window.print()} data-testid="print-tickets-btn" className="w-full bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E5FF] text-[#00E5FF] rounded-lg py-3 font-semibold flex items-center justify-center gap-2">
                 <Printer size={18} /> Печать
               </button>
@@ -721,7 +832,7 @@ export default function Pos() {
               <div className="flex justify-between font-bold border-t border-dashed border-black mt-2 pt-2">
                 <span>ИТОГО</span><span>{receipt.total.toFixed(2)} ₽</span>
               </div>
-              <div className="text-center text-xs mt-2">Оплата: {receipt.payment_method === "cash" ? "наличные" : "карта"}</div>
+              <div className="text-center text-xs mt-2">Оплата: {receipt.is_debt ? "в долг" : (methods.find((m) => m.code === receipt.payment_method)?.name || receipt.payment_method)}</div>
             </div>
             <button onClick={() => setReceipt(null)} data-testid="receipt-close-btn"
               className="w-full mt-4 bg-[#FF5A00] hover:bg-[#E04F00] text-white rounded-lg py-3 font-semibold active:scale-95 transition-transform">
@@ -730,11 +841,81 @@ export default function Pos() {
           </div>
         </div>
       )}
+      {/* Cash movement modal (Задача 12) */}
+      {cashMove && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={() => setCashMove(null)}>
+          <div className="w-full max-w-sm bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-head text-xl font-bold flex items-center gap-2"><Wallet size={20} /> Касса: движение налички</h3>
+              <button onClick={() => setCashMove(null)} data-testid="cash-close-btn"><X size={20} className="text-[#A1A1AA]" /></button>
+            </div>
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <button onClick={() => setCashMove({ type: "in" })} data-testid="cash-type-in"
+                className={`rounded-lg py-3 border font-semibold ${cashMove.type === "in" ? "border-[#00E676] bg-[#00E67611] text-[#00E676]" : "border-[#27272A] text-[#A1A1AA]"}`}>Внесение</button>
+              <button onClick={() => setCashMove({ type: "out" })} data-testid="cash-type-out"
+                className={`rounded-lg py-3 border font-semibold ${cashMove.type === "out" ? "border-[#FF3B30] bg-[#FF3B3011] text-[#FF3B30]" : "border-[#27272A] text-[#A1A1AA]"}`}>Изъятие</button>
+            </div>
+            <input type="number" value={cashAmt} onChange={(e) => setCashAmt(e.target.value)} data-testid="cash-amount-input" placeholder="Сумма, ₽"
+              className="w-full mb-3 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 outline-none focus:border-[#FF5A00]" />
+            <input value={cashReason} onChange={(e) => setCashReason(e.target.value)} data-testid="cash-reason-input" placeholder="Причина (напр. размен, инкассация)"
+              className="w-full mb-4 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 text-sm outline-none focus:border-[#FF5A00]" />
+            <button onClick={doCashMove} data-testid="cash-confirm-btn"
+              className="w-full bg-[#FF5A00] hover:bg-[#E04F00] text-white rounded-lg py-3 font-semibold active:scale-95 transition-transform">Записать</button>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel order modal (Задача 12) */}
+      {cancelOpen && (
+        <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4" onClick={() => setCancelOpen(false)}>
+          <div className="w-full max-w-sm bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()}>
+            <div className="w-12 h-12 rounded-xl bg-[#FF3B3011] text-[#FF3B30] flex items-center justify-center mb-4"><AlertTriangle size={24} /></div>
+            <h3 className="font-head text-xl font-bold mb-2">Отменить заказ?</h3>
+            <p className="text-sm text-[#A1A1AA] mb-4">Если заказ отправлен на кухню — укажите причину (запишется в отчёт).</p>
+            <div className="flex flex-wrap gap-2 mb-3">
+              {quickComments.filter((c) => c.context === "cancel").map((c) => (
+                <button key={c.id} onClick={() => setCancelReason(c.text)} data-testid={`cancel-qc-${c.id}`}
+                  className={`text-xs px-3 py-1.5 rounded-full border ${cancelReason === c.text ? "border-[#FF3B30] text-[#FF3B30] bg-[#FF3B3011]" : "border-[#27272A] text-[#A1A1AA]"}`}>{c.text}</button>
+              ))}
+            </div>
+            <input value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} data-testid="cancel-reason-input" placeholder="Причина отмены"
+              className="w-full mb-4 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 text-sm outline-none focus:border-[#FF3B30]" />
+            <div className="flex gap-3">
+              <button onClick={() => setCancelOpen(false)} data-testid="cancel-abort-btn"
+                className="flex-1 bg-[#1A1A1A] border border-[#27272A] hover:border-[#A1A1AA] text-white rounded-lg py-3 font-semibold">Назад</button>
+              <button onClick={cancelOrder} data-testid="cancel-confirm-btn"
+                className="flex-1 bg-[#FF3B30] hover:bg-[#e0342a] text-white rounded-lg py-3 font-semibold">Отменить заказ</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Item comment modal (Задача 12) */}
+      {commentFor !== null && (
+        <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4" onClick={() => setCommentFor(null)}>
+          <div className="w-full max-w-sm bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()} data-testid="comment-modal">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-head text-xl font-bold flex items-center gap-2"><MessageSquare size={20} /> Комментарий к блюду</h3>
+              <button onClick={() => setCommentFor(null)} data-testid="comment-close-btn"><X size={20} className="text-[#A1A1AA]" /></button>
+            </div>
+            <div className="flex flex-wrap gap-2 mb-3">
+              {quickComments.filter((c) => c.context === "dish").map((c) => (
+                <button key={c.id} onClick={() => setCommentText(c.text)} data-testid={`dish-qc-${c.id}`}
+                  className={`text-xs px-3 py-1.5 rounded-full border ${commentText === c.text ? "border-[#A855F7] text-[#A855F7] bg-[#A855F711]" : "border-[#27272A] text-[#A1A1AA]"}`}>{c.text}</button>
+              ))}
+            </div>
+            <input value={commentText} onChange={(e) => setCommentText(e.target.value)} data-testid="comment-input" placeholder="Свой комментарий"
+              className="w-full mb-4 bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 text-sm outline-none focus:border-[#A855F7]" />
+            <button onClick={saveComment} data-testid="comment-save-btn"
+              className="w-full bg-[#FF5A00] hover:bg-[#E04F00] text-white rounded-lg py-3 font-semibold active:scale-95 transition-transform">Сохранить</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function PosTopBar({ user, shift, onLogout, onCloseShift, floating }) {
+function PosTopBar({ user, shift, onLogout, onCloseShift, onCash, floating }) {
   return (
     <div className={`h-16 border-b border-[#27272A] bg-[#0A0A0A] flex items-center justify-between px-6 ${floating ? "w-full absolute top-0" : ""}`}>
       <div className="flex items-center gap-3">
@@ -744,6 +925,11 @@ function PosTopBar({ user, shift, onLogout, onCloseShift, floating }) {
       </div>
       <div className="flex items-center gap-4">
         <span className="text-sm text-[#A1A1AA]">{user.name}</span>
+        {shift && user.role === "admin" && onCash && (
+          <button onClick={onCash} data-testid="cash-move-btn" className="text-sm text-[#A1A1AA] hover:text-[#FACC15] flex items-center gap-1">
+            <Wallet size={16} /> Касса
+          </button>
+        )}
         {shift && user.role === "admin" && (
           <button onClick={onCloseShift} data-testid="close-shift-btn" className="text-sm text-[#A1A1AA] hover:text-[#FF3B30] flex items-center gap-1">
             <Power size={16} /> Закрыть смену

@@ -1,0 +1,63 @@
+{
+  "summary": "Full e2e test of Tasks 12/14/15 (quick comments, cash movements, cancel reason, configurable payment methods + client debt, serving courses). Backend: new pytest suite /app/backend/tests/test_final_iter14.py — 30/30 pass (payment-methods CRUD + role gating + seeded cash/card/debt; debt pay requires client (400) / debt_balance increases / cashback suppressed; pay-debt partial + capped overpay + 400 on no debt + 404 unknown client; /reports/debts rows+total & manager-only; quick-comments CRUD + ?context filter + 422 invalid context; cash-movement in/out + 400 amount<=0 + 422 bad type + admin-only + GET by shift; DELETE order requires reason only when sent (whitespace-only rejected, correction logged); category course_number CRUD, product override wins / clears back to category, order item course_number+comment persisted, kitchen ticket text groups '-- Подача N --' and prints '  * comment'; close_shift returns cash_in/cash_out/expected_cash/total_debt with correct math; cash & card pay regression). Frontend: /admin/settings (Справочники) payment-method add/edit/delete with is_debt toggle and quick-comment add/edit/delete verified; Menu>Категории per-category 'Курс' input persists after reload; Reports 'Долги' tab renders rows + total; POS (PIN 2222) verified: 'Касса' cash-movement modal (Внесение/Изъятие) records movement, cart grouped under '— ПОДАЧА N —' headers, per-item comment modal with dish quick-comment chips saves and renders in cart AND prints on the kitchen ticket, dynamic payment buttons from /api/payment-methods with 'В долг' disabled until phone lookup then enabled + red hint, debt payment closed the order (receipt 'Оплата: в долг'), client debt_balance became 10.80 with bonus_balance unchanged (no cashback), cancel-order modal with cancel chips rejects an empty reason (400 + toast) and succeeds with a reason (logged in Удаления report). ONE CRITICAL integration bug: the manager cannot repay a debt from /admin/clients (403).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/clients/{id}/pay-debt", "issue": "Gated with require_roles(\"admin\") only, but the 'Погасить долг' UI lives on /admin/clients which is a manager-only back-office page. Logged in as manager (admin@resto.com) the modal always fails with 403 'Недостаточно прав' and the debt is never reduced — the whole Task-14 debt-repayment UI is dead for the only role that can reach it. Verified by curl (manager 403 / cashier 200) and in the browser. Fix: require_roles(\"manager\", \"admin\").", "priority": "CRITICAL"}
+    ],
+    "minor": [
+      {"endpoint": "POST /api/orders/{id}/pay", "issue": "req.payment_method is not validated against the payment_methods collection — any arbitrary string is accepted (also an inactive method). Combined with close_shift, which hardcodes payment_method=='cash'/'card' for total_cash/total_card, revenue paid with a custom method created in Справочники (e.g. 'transfer') is counted in total_sales but in neither total_cash nor total_card, so the shift Z-report / expected_cash silently under-reports. Recommend validating the code exists & active, and computing shift totals per payment method."},
+      {"endpoint": "POST /api/restaurants", "issue": "Multi-tenancy gap: seeding of payment_methods and quick_comments only runs for the default restaurant at startup. A newly created tenant has zero payment methods, so the POS checkout renders no payment buttons (only the implicit default 'cash' state) and no quick-comment chips. Seed defaults on restaurant creation."},
+      {"endpoint": "GET /api/clients/{id}, GET /api/products/{id}", "issue": "No single-resource GET endpoints exist (only list). Not blocking (frontend uses lists) but makes verification/consumption awkward; a bogus id silently falls through to another route shape instead of 404."},
+      {"endpoint": "PUT /api/payment-methods/{id}", "issue": "code is not unique-checked — two methods can share the same code (e.g. two 'cash'), and pay_order resolves is_debt with find_one, so the first match wins non-deterministically."},
+      {"endpoint": "DELETE /api/payment-methods/{id}", "issue": "Seeded/system methods (cash, card, debt) can be deleted with no guard; deleting 'cash' leaves historical orders referencing a non-existent method and can leave the POS with no non-debt method."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "pages/admin/Clients.jsx — Погашение долга modal", "issue": "Submitting shows toast 'Недостаточно прав' and the debt cell stays unchanged (backend 403, see critical backend issue). Modal also stays open with no inline error, so it looks like a silent failure.", "selector": "[data-testid=\"save-debt-btn\"]", "priority": "CRITICAL"},
+      {"component": "pages/pos/Pos.jsx — cancel-order modal", "issue": "No client-side validation: 'Отменить заказ' with an empty reason fires a 400 round-trip. The localized toast is fine, but the confirm button should be disabled (or the reason required) when the order was already sent.", "selector": "[data-testid=\"cancel-confirm-btn\"]", "priority": "LOW"},
+      {"component": "pages/pos/Pos.jsx — saveComment", "issue": "The PUT /orders/{id} that persists an item comment is wrapped in `catch (e) { /* ignore */ }`. If it fails the comment shows in the local cart but never reaches the kitchen ticket, with zero feedback to the cashier.", "selector": "[data-testid=\"comment-save-btn\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "Manager repays client debt (/admin/clients → Погасить долг)", "issue": "403 from POST /api/clients/{id}/pay-debt — role mismatch between the endpoint (admin/cashier only) and the page (manager only). Only workaround today is a cashier token.", "affected_selectors": ["[data-testid^=\"pay-debt-\"]", "[data-testid=\"save-debt-btn\"]"]}
+    ],
+    "design_issues": [
+      {"screen": "POS kitchen-tickets preview modal (Печать на цеха)", "issues": ["The on-screen preview lists only 'name ×count' — it does not show the '-- Подача N --' course headers or the item comments that ARE printed on the physical ticket, so the cashier cannot verify what the kitchen will get"]},
+      {"screen": "POS cart", "issues": ["Item comment line ('✎ ...') is 11px italic #A855F7 on #1A1A1A — very low contrast for an instruction the kitchen depends on", "Course header '— ПОДАЧА N —' is 10px uppercase and easy to miss"]},
+      {"screen": "/admin/menu → Категории", "issues": ["The per-category 'Курс' number input saves on blur with no visual confirmation (no toast / no highlight), so the user cannot tell the change was persisted"]},
+      {"screen": "/admin/reports", "issues": ["Native <input type=date> still used for the period pickers instead of the shadcn calendar (pre-existing, carried over from iteration 13)"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_final_iter14.py",
+    "/app/test_reports/pytest/final_iter14.xml"
+  ],
+  "action_items": [
+    "CRITICAL: change POST /api/clients/{id}/pay-debt to require_roles(\"manager\", \"admin\") — manager currently gets 403 from the only UI that calls it.",
+    "Validate order pay payment_method against active payment_methods, and make close_shift totals per-method instead of hardcoded cash/card (custom methods are lost from the Z-report).",
+    "Seed default payment_methods + quick_comments when a new restaurant is created (new tenant currently has no payment buttons in POS).",
+    "Show course headers and item comments in the POS kitchen-tickets preview modal.",
+    "Do not swallow the comment-persist PUT error in Pos.jsx saveComment — surface a toast.",
+    "Disable the cancel-confirm button while the reason is empty for a sent order (avoid the 400 round-trip).",
+    "Guard deletion / duplicate codes of system payment methods (cash/card/debt).",
+    "Raise contrast/size of the cart comment and course-header text.",
+    "Leftover test data in the demo menu: a product named 'TEST_Блюдо_214934' (1500 ₽) still appears in Dashboard 'Топ позиций' from an earlier iteration — remove it."
+  ],
+  "critical_code_review_comments": [
+    "server.py: role gating for the new endpoints was chosen per-caller (POS) without checking the back-office callers — pay_debt(admin) vs /admin/clients(manager) is a hard 403. Audit require_roles for every endpoint reachable from /admin.",
+    "server.py close_shift: total_cash/total_card are computed with hardcoded string comparisons ('cash'/'card') while Task 14 makes payment methods user-configurable — the two features contradict each other; aggregate by payment_method code instead.",
+    "server.py seed(): payment_methods/quick_comments (and course_number backfill) are only seeded for default_rid; create_restaurant does no per-tenant seeding, so multi-tenancy is broken for the new dictionaries.",
+    "server.py pay_order: pm_doc lookup does not filter on active:true and does not 404/400 on an unknown code — an inactive or non-existent method silently closes the order.",
+    "Pos.jsx is 929 lines with ~8 inline modals; consider extracting the modals (checkout, cash movement, cancel, comment, tickets) into components — it is above the 700-line guideline and was already the source of a hard crash in iteration 13."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_final_iter14.py"
+  ],
+  "success_rate": {"backend": "100% (30/30 new feature tests) — but 1 CRITICAL role-gating defect found only via the UI path", "frontend": "~92% — every new Task 12/14/15 screen and POS flow works except the manager debt-repayment modal (403)"},
+  "seed_data_creation": "Temporary only, all reverted: TEST_Перевод payment method (deleted), TEST_остро quick comment (deleted), category course_number set to 1/2/3 then reset to 0, cash movements (in 500/300, out 120.50/250 — these remain in the current open shift by design), a debt order of 10.80 ₽ for 'Иван Петров' (debt repaid, debt_balance back to 0.00), 3 cancelled/paid test orders. Shift left OPEN for further POS testing; no open orders remain; payment methods back to the 3 seeded defaults; quick comments back to 7 seeded rows.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "manager admin@resto.com/admin123; admin PIN 2222; waiter PIN 1111 (from /app/memory/test_credentials.md)",
+  "context_for_next_testing_agent": "Run `python -m pytest tests/test_final_iter14.py -n 0 -p no:randomly` from /app/backend (serial: the last class closes and reopens the shift). Gotchas discovered: (1) there is NO GET /api/clients/{id} or /api/products/{id} — read from the list endpoints (helpers _get_client/_get_product in the suite); (2) an order item must carry workshop_id or /send produces no print job (kitchen-ticket assertions then find no text); (3) course headers only appear on 'ticket'/'void' jobs, never on 'precheck'; (4) the POS product grid opens a modifier picker for all 'Бургеры' items — use Напитки/Салаты for simple add-to-cart; (5) after 'Отправить на кухню' a full-screen tickets modal (data-testid=tickets-close-btn) blocks the checkout button — close it first; (6) manager tab on /login prefills email+password, just click 'Войти'; POS login = click 2222 on the pad. After the pay-debt role fix, re-verify /admin/clients pay-debt end to end (partial + full) since that is the only untested path left.",
+  "rca_of_the_issue": "Manager debt repayment 403: server.py defines `pay_debt` as `Depends(require_roles(\"admin\"))` because it was designed for the cashier. The only UI calling it is Clients.jsx (`POST /clients/{id}/pay-debt` from the 'Погашение долга' modal), which is rendered inside AdminLayout — a manager-only back-office route. Reproduced in the browser (toast 'Недостаточно прав', debt cell unchanged at 10.80) and by curl: manager token -> 403 {'detail':'Недостаточно прав'}, cashier PIN-2222 token -> 200 {'debt_balance':0.0,'paid':10.8}. The backend pytest suite passed because it uses the cashier session. Fix: require_roles(\"manager\", \"admin\") on pay_debt (and re-check the same mismatch for any other admin-gated endpoint called from /admin pages)."
+}

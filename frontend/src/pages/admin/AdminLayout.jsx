@@ -4,7 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import api from "@/lib/api";
 import {
   LayoutDashboard, UtensilsCrossed, Factory, Grid3x3, Warehouse,
-  Users, BarChart3, LogOut, ChefHat, Monitor, Printer, Contact, Gift,
+  Users, BarChart3, LogOut, ChefHat, Monitor, Printer, Contact, Gift, CalendarClock, Settings,
 } from "lucide-react";
 
 const items = [
@@ -17,6 +17,8 @@ const items = [
   { to: "/admin/staff", icon: Users, label: "Сотрудники" },
   { to: "/admin/clients", icon: Contact, label: "Клиенты" },
   { to: "/admin/loyalty", icon: Gift, label: "Лояльность" },
+  { to: "/admin/reservations", icon: CalendarClock, label: "Резервы" },
+  { to: "/admin/settings", icon: Settings, label: "Справочники" },
   { to: "/admin/reports", icon: BarChart3, label: "Отчёты" },
 ];
 

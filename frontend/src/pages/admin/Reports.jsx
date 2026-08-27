@@ -20,6 +20,8 @@ const TABS = [
   ["hall", "Залы"],
   ["promo", "Акции"],
   ["loyalty", "Лояльность"],
+  ["refunds", "Возвраты"],
+  ["debts", "Долги"],
   ["corrections", "Удаления"],
 ];
 
@@ -89,6 +91,16 @@ export default function Reports() {
     queryKey: ["rep-loyalty", start, end],
     queryFn: async () => (await api.get(`/reports/loyalty${range}`)).data,
     enabled: tab === "loyalty",
+  });
+  const { data: refundsRep = {} } = useQuery({
+    queryKey: ["rep-refunds", start, end],
+    queryFn: async () => (await api.get(`/reports/refunds${range}`)).data,
+    enabled: tab === "refunds",
+  });
+  const { data: debtsRep = {} } = useQuery({
+    queryKey: ["rep-debts"],
+    queryFn: async () => (await api.get(`/reports/debts`)).data,
+    enabled: tab === "debts",
   });
   const [whFilter, setWhFilter] = useState("");
   const { data: invReport = {} } = useQuery({
@@ -452,6 +464,54 @@ export default function Reports() {
             </Card>
           ))}
         </div>
+      )}
+
+      {tab === "refunds" && (
+        <Card data-testid="report-panel-refunds">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-head text-lg font-bold">Возвраты</h3>
+            <span className="text-sm text-[#A1A1AA]">Сумма: <span className="text-[#FF3B30] tabnum">{money(refundsRep.total)}</span></span>
+          </div>
+          <table className="w-full text-sm">
+            <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
+              <th className="text-left p-3">Дата</th><th className="text-left p-3">Позиции</th><th className="text-left p-3">Причина</th><th className="text-left p-3">Кто</th><th className="text-right p-3">Сумма</th></tr></thead>
+            <tbody>
+              {(refundsRep.rows || []).map((r, i) => (
+                <tr key={i} className="border-b border-[#1A1A1A]" data-testid={`refund-row-${i}`}>
+                  <td className="p-3 text-[#A1A1AA]">{(r.created_at || "").slice(0, 16).replace("T", " ")}</td>
+                  <td className="p-3">{(r.items || []).map((x) => `${x.name}×${x.qty}`).join(", ")}</td>
+                  <td className="p-3 text-[#A1A1AA]">{r.reason}</td>
+                  <td className="p-3 text-[#A1A1AA]">{r.staff_name}</td>
+                  <td className="p-3 text-right tabnum text-[#FF3B30]">{money(r.amount)}</td>
+                </tr>
+              ))}
+              {(refundsRep.rows || []).length === 0 && <tr><td colSpan="5" className="p-6 text-center text-[#52525B]">Возвратов нет</td></tr>}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      {tab === "debts" && (
+        <Card data-testid="report-panel-debts">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-head text-lg font-bold">Долги клиентов</h3>
+            <span className="text-sm text-[#A1A1AA]">Итого: <span className="text-[#FF3B30] tabnum">{money(debtsRep.total)}</span></span>
+          </div>
+          <table className="w-full text-sm">
+            <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
+              <th className="text-left p-3">Клиент</th><th className="text-left p-3">Телефон</th><th className="text-right p-3">Долг</th></tr></thead>
+            <tbody>
+              {(debtsRep.rows || []).map((r, i) => (
+                <tr key={i} className="border-b border-[#1A1A1A]" data-testid={`debt-row-${i}`}>
+                  <td className="p-3 font-medium">{r.name}</td>
+                  <td className="p-3 text-[#A1A1AA] tabnum">{r.phone}</td>
+                  <td className="p-3 text-right tabnum text-[#FF3B30]">{money(r.debt_balance)}</td>
+                </tr>
+              ))}
+              {(debtsRep.rows || []).length === 0 && <tr><td colSpan="3" className="p-6 text-center text-[#52525B]">Задолженностей нет</td></tr>}
+            </tbody>
+          </table>
+        </Card>
       )}
 
       {tab === "corrections" && (

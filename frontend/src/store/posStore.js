@@ -16,7 +16,7 @@ export const usePosStore = create((set, get) => ({
     const cart = [...get().cart];
     const key = JSON.stringify((selectedModifiers || []).map((m) => m.option_id).sort());
     const idx = cart.findIndex(
-      (c) => c.product_id === product.id && c.print_status !== "printed" &&
+      (c) => c.product_id === product.id && c.print_status !== "printed" && !c.comment &&
         JSON.stringify((c.selected_modifiers || []).map((m) => m.option_id).sort()) === key);
     if (idx >= 0) {
       cart[idx] = { ...cart[idx], count: cart[idx].count + 1 };
@@ -27,12 +27,17 @@ export const usePosStore = create((set, get) => ({
         price: product.price,
         count: 1,
         workshop_id: product.workshop_id || null,
+        course_number: product.course_number || 0,
+        comment: null,
         print_status: "pending",
         selected_modifiers: selectedModifiers || [],
       });
     }
     set({ cart });
   },
+
+  setComment: (index, comment) =>
+    set({ cart: get().cart.map((c, i) => (i === index ? { ...c, comment: comment || null } : c)) }),
 
   changeCount: (index, delta) => {
     let cart = get().cart.map((c, i) => (i === index ? { ...c, count: c.count + delta } : c));
