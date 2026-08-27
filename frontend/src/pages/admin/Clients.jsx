@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import api, { apiErr } from "@/lib/api";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Search } from "lucide-react";
+import { Plus, Pencil, Trash2, Search, History } from "lucide-react";
 import { PageHead, Btn, Field, SelectField, Modal } from "@/components/admin/ui";
 
 export default function Clients() {
@@ -17,7 +17,13 @@ export default function Clients() {
   const [debtFor, setDebtFor] = useState(null);
   const [debtAmt, setDebtAmt] = useState("");
   const [debtPm, setDebtPm] = useState("cash");
+  const [historyFor, setHistoryFor] = useState(null);
   const { data: methods = [] } = useQuery({ queryKey: ["payment-methods"], queryFn: async () => (await api.get("/payment-methods")).data });
+  const { data: debtHistory = [] } = useQuery({
+    queryKey: ["debt-history", historyFor?.id],
+    queryFn: async () => (await api.get(`/clients/${historyFor.id}/debt-transactions`)).data,
+    enabled: !!historyFor,
+  });
 
   const shown = clients.filter((c) => {
     if (!q.trim()) return true;
@@ -77,6 +83,7 @@ export default function Clients() {
                 <td className="p-4 text-[#A1A1AA] text-xs">{lgroups.find((g) => g.id === c.loyalty_group_id)?.name || "—"}</td>
                 <td className="p-4">
                   <div className="flex gap-2 justify-end">
+                    <button onClick={() => setHistoryFor(c)} className="text-[#A1A1AA] hover:text-[#C084FC]" data-testid={`debt-history-${c.id}`} title="История долга"><History size={16} /></button>
                     <button onClick={() => { setBonusFor(c); setBonusAmt(""); }} className="text-[#00E676] hover:text-white text-xs font-semibold" data-testid={`bonus-client-${c.id}`}>± бонус</button>
                     <button onClick={() => { setForm({ id: c.id, name: c.name, phone: c.phone, discount_percent: c.discount_percent, loyalty_group_id: c.loyalty_group_id }); setModal(true); }} className="text-[#A1A1AA] hover:text-white" data-testid={`edit-client-${c.id}`}><Pencil size={16} /></button>
                     <button onClick={() => del(c.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-client-${c.id}`}><Trash2 size={16} /></button>
@@ -115,6 +122,28 @@ export default function Clients() {
           <SelectField label="Способ оплаты" value={debtPm} onChange={(e) => setDebtPm(e.target.value)} data-testid="debt-method-select"
             options={methods.filter((m) => !m.is_debt && m.active).map((m) => ({ value: m.code, label: m.name }))} />
           <Btn onClick={payDebt} className="w-full" data-testid="save-debt-btn">Погасить</Btn>
+        </div>
+      </Modal>
+      <Modal open={!!historyFor} onClose={() => setHistoryFor(null)} title={`История долга: ${historyFor?.name || ""}`}>
+        <div className="space-y-3">
+          <p className="text-sm text-[#A1A1AA]">Текущий долг: <span className="text-[#FF3B30] tabnum font-semibold">{Number(historyFor?.debt_balance || 0).toFixed(2)} ₽</span></p>
+          <div className="max-h-80 overflow-y-auto" data-testid="debt-history-list">
+            {debtHistory.length === 0 && <p className="text-sm text-[#52525B] py-6 text-center">Операций по долгу нет</p>}
+            {debtHistory.map((t, i) => (
+              <div key={i} className="flex items-center justify-between border-b border-[#1A1A1A] py-2.5" data-testid={`debt-tx-${i}`}>
+                <div>
+                  <div className={`text-sm font-semibold ${t.type === "charge" ? "text-[#FF3B30]" : "text-[#00E676]"}`}>
+                    {t.type === "charge" ? "Начисление (заказ)" : "Погашение"}
+                  </div>
+                  <div className="text-xs text-[#52525B]">{(t.created_at || "").slice(0, 16).replace("T", " ")}{t.payment_method ? ` · ${methods.find((m) => m.code === t.payment_method)?.name || t.payment_method}` : ""}</div>
+                </div>
+                <div className="text-right">
+                  <div className={`tabnum font-semibold ${t.type === "charge" ? "text-[#FF3B30]" : "text-[#00E676]"}`}>{t.type === "charge" ? "+" : "−"}{Number(t.amount || 0).toFixed(2)} ₽</div>
+                  <div className="text-xs text-[#52525B] tabnum">остаток {Number(t.balance_after || 0).toFixed(2)}</div>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </Modal>
     </div>

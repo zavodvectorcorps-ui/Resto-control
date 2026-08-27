@@ -158,7 +158,7 @@ class TestPrintJobs:
         r = cashier.post(f"{API}/orders/{o['id']}/send", json={}, timeout=30)
         assert r.status_code == 200, r.text[:300]
         data = r.json()
-        assert set(data["tickets"].keys()) == {"Кухня", "Бар"}
+        assert {t["workshop"] for t in data["tickets"]} == {"Кухня", "Бар"}
         assert len(data["jobs"]) == 2, f"expected 2 jobs (kitchen+bar) got {data['jobs']}"
         for j in data["jobs"]:
             assert j["type"] == "ticket"
@@ -196,7 +196,7 @@ class TestPrintJobs:
         r2 = cashier.post(f"{API}/orders/{o['id']}/send", json={}, timeout=30)
         assert r2.status_code == 200
         d2 = r2.json()
-        assert list(d2["tickets"].keys()) == ["Кухня"], d2["tickets"]
+        assert [t["workshop"] for t in d2["tickets"]] == ["Кухня"], d2["tickets"]
         assert len(d2["jobs"]) == 1
         assert "Цезарь" in d2["jobs"][0]["text"] and "Кола" not in d2["jobs"][0]["text"]
         cashier.delete(f"{API}/orders/{o['id']}", timeout=30)

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import api from "@/lib/api";
+import { downloadCSV } from "@/lib/csv";
+import { Download } from "lucide-react";
 import { PageHead } from "@/components/admin/ui";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Legend,
@@ -10,6 +12,13 @@ import {
 const money = (n) => `${Number(n || 0).toFixed(2)} ₽`;
 const today = () => new Date().toISOString().slice(0, 10);
 const weekAgo = () => new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10);
+
+const ExportBtn = ({ onClick, disabled }) => (
+  <button onClick={onClick} disabled={disabled} data-testid="export-csv-btn"
+    className="flex items-center gap-2 text-xs font-semibold px-3 py-2 rounded-lg border border-[#27272A] text-[#A1A1AA] hover:text-[#00E676] hover:border-[#00E676] disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+    <Download size={14} /> Экспорт CSV
+  </button>
+);
 
 const TABS = [
   ["sales", "Продажи"],
@@ -157,7 +166,12 @@ export default function Reports() {
             <Card>
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-head text-lg font-bold">Продажи по клиентам</h3>
-                <span className="text-sm text-[#A1A1AA]">Скидок выдано: <span className="text-[#FF3B30] tabnum">{money(byClient.total_discount)}</span></span>
+                <div className="flex items-center gap-4">
+                  <span className="text-sm text-[#A1A1AA]">Скидок выдано: <span className="text-[#FF3B30] tabnum">{money(byClient.total_discount)}</span></span>
+                  <ExportBtn disabled={!(byClient.rows || []).length}
+                    onClick={() => downloadCSV(`sales_by_client_${start}_${end}.csv`, ["Клиент", "Заказов", "Скидка", "Выручка"],
+                      (byClient.rows || []).map((r) => [r.client_name, r.order_count, Number(r.total_discount || 0).toFixed(2), Number(r.total_revenue || 0).toFixed(2)]))} />
+                </div>
               </div>
               <table className="w-full text-sm">
                 <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
@@ -198,7 +212,12 @@ export default function Reports() {
               </ResponsiveContainer>
             </Card>
             <Card>
-              <h3 className="font-head text-lg font-bold mb-4">По позициям</h3>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-head text-lg font-bold">По позициям</h3>
+                <ExportBtn disabled={!(data.by_product || []).length}
+                  onClick={() => downloadCSV(`sales_by_product_${start}_${end}.csv`, ["Позиция", "Кол-во", "Выручка"],
+                    (data.by_product || []).map((p) => [p.name, p.count, Number(p.revenue || 0).toFixed(2)]))} />
+              </div>
               <div className="space-y-3 max-h-64 overflow-y-auto">
                 {(data.by_product || []).map((p, i) => (
                   <div key={i} className="flex justify-between text-sm">
@@ -250,7 +269,12 @@ export default function Reports() {
             </ResponsiveContainer>
           </Card>
           <Card>
-            <h3 className="font-head text-lg font-bold mb-4">Маржинальность по блюдам</h3>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-head text-lg font-bold">Маржинальность по блюдам</h3>
+              <ExportBtn disabled={!(analytics.margin_by_product || []).length}
+                onClick={() => downloadCSV(`margin_${start}_${end}.csv`, ["Блюдо", "Кол-во", "Выручка", "Себестоимость", "Маржа", "Маржа %"],
+                  (analytics.margin_by_product || []).map((m) => [m.name, m.qty, Number(m.revenue || 0).toFixed(2), Number(m.cost || 0).toFixed(2), Number(m.margin || 0).toFixed(2), m.margin_pct]))} />
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -435,7 +459,12 @@ export default function Reports() {
 
       {tab === "promo" && (
         <Card data-testid="report-panel-promo">
-          <h3 className="font-head text-lg font-bold mb-4">Эффективность акций</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-head text-lg font-bold">Эффективность акций</h3>
+            <ExportBtn disabled={!(promoRep.rows || []).length}
+              onClick={() => downloadCSV(`promotions_${start}_${end}.csv`, ["Акция", "Применений", "Скидка", "Выручка", "ROI"],
+                (promoRep.rows || []).map((r) => [r.name, r.times_applied, Number(r.discount_value || 0).toFixed(2), Number(r.revenue || 0).toFixed(2), r.roi != null ? r.roi : ""]))} />
+          </div>
           <table className="w-full text-sm">
             <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
               <th className="text-left p-3">Акция</th><th className="text-right p-3">Применений</th><th className="text-right p-3">Скидка</th><th className="text-right p-3">Выручка</th><th className="text-right p-3">ROI</th></tr></thead>
@@ -470,7 +499,12 @@ export default function Reports() {
         <Card data-testid="report-panel-refunds">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-head text-lg font-bold">Возвраты</h3>
-            <span className="text-sm text-[#A1A1AA]">Сумма: <span className="text-[#FF3B30] tabnum">{money(refundsRep.total)}</span></span>
+            <div className="flex items-center gap-4">
+              <span className="text-sm text-[#A1A1AA]">Сумма: <span className="text-[#FF3B30] tabnum">{money(refundsRep.total)}</span></span>
+              <ExportBtn disabled={!(refundsRep.rows || []).length}
+                onClick={() => downloadCSV(`refunds_${start}_${end}.csv`, ["Дата", "Позиции", "Причина", "Кто", "Сумма"],
+                  (refundsRep.rows || []).map((r) => [(r.created_at || "").slice(0, 16).replace("T", " "), (r.items || []).map((x) => `${x.name}x${x.qty}`).join(", "), r.reason, r.staff_name, Number(r.amount || 0).toFixed(2)]))} />
+            </div>
           </div>
           <table className="w-full text-sm">
             <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
@@ -495,7 +529,12 @@ export default function Reports() {
         <Card data-testid="report-panel-debts">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-head text-lg font-bold">Долги клиентов</h3>
-            <span className="text-sm text-[#A1A1AA]">Итого: <span className="text-[#FF3B30] tabnum">{money(debtsRep.total)}</span></span>
+            <div className="flex items-center gap-4">
+              <span className="text-sm text-[#A1A1AA]">Итого: <span className="text-[#FF3B30] tabnum">{money(debtsRep.total)}</span></span>
+              <ExportBtn disabled={!(debtsRep.rows || []).length}
+                onClick={() => downloadCSV(`debts_${today()}.csv`, ["Клиент", "Телефон", "Долг"],
+                  (debtsRep.rows || []).map((r) => [r.name, r.phone, Number(r.debt_balance || 0).toFixed(2)]))} />
+            </div>
           </div>
           <table className="w-full text-sm">
             <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
@@ -516,7 +555,12 @@ export default function Reports() {
 
       {tab === "corrections" && (
         <Card data-testid="report-panel-corrections">
-          <h3 className="font-head text-lg font-bold mb-4">Удаления позиций (контроль)</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-head text-lg font-bold">Удаления позиций (контроль)</h3>
+            <ExportBtn disabled={!corrections.length}
+              onClick={() => downloadCSV(`corrections_${start}_${end}.csv`, ["Дата", "Позиция", "Причина", "Подтвердил", "Сумма"],
+                corrections.map((c) => [(c.created_at || "").slice(0, 16).replace("T", " "), c.item_name, c.reason, c.staff_name, Number(c.item_price || 0).toFixed(2)]))} />
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>

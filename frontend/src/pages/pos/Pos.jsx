@@ -48,6 +48,7 @@ export default function Pos() {
   const [cancelReason, setCancelReason] = useState("");
   const [commentFor, setCommentFor] = useState(null); // cart index
   const [commentText, setCommentText] = useState("");
+  const [zReport, setZReport] = useState(null);
 
   const toggleStop = async (p, e) => {
     e.stopPropagation();
@@ -74,11 +75,12 @@ export default function Pos() {
     [products, cat]
   );
 
-  const openShift = async () => { await api.post("/shifts/open"); refetchShift(); toast.success("Смена открыта"); };
+  const openShift = async () => { setZReport(null); await api.post("/shifts/open"); refetchShift(); toast.success("Смена открыта"); };
   const closeShift = async () => {
     try {
       const { data } = await api.post("/shifts/close");
       refetchShift();
+      setZReport(data);
       toast.success(`Смена закрыта. Выручка: ${money(data.total_sales)}`);
     } catch (e) { toast.error(apiErr(e)); }
   };
@@ -116,14 +118,16 @@ export default function Pos() {
   };
 
   const sendKitchen = async () => {
-    const id = await saveOrder();
-    if (!id) return;
-    const { data } = await api.post(`/orders/${id}/send`);
-    setTickets(data.tickets);
-    const { data: order } = await api.get(`/orders/${id}`);
-    store.loadCart(order.items, id, store.tableId, store.tableName);
-    refetchTables();
-    toast.success("Заказ отправлен на кухню");
+    try {
+      const id = await saveOrder();
+      if (!id) return;
+      const { data } = await api.post(`/orders/${id}/send`);
+      setTickets(data.tickets && data.tickets.length ? data.tickets : null);
+      const { data: order } = await api.get(`/orders/${id}`);
+      store.loadCart(order.items, id, store.tableId, store.tableName);
+      refetchTables();
+      toast.success("Заказ отправлен на кухню");
+    } catch (e) { toast.error(apiErr(e)); }
   };
 
   const requestBill = async () => {
@@ -319,10 +323,62 @@ export default function Pos() {
   const canPay = user.role === "admin";
 
   // ---- No shift open ----
+  const zReportModal = zReport && (
+    <div className="fixed inset-0 z-[70] bg-black/70 flex items-center justify-center p-4" onClick={() => setZReport(null)}>
+      <div className="w-full max-w-md bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()} data-testid="z-report-modal">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="font-head text-xl font-bold flex items-center gap-2"><Receipt size={20} /> Отчёт по смене (Z)</h3>
+          <button onClick={() => setZReport(null)} data-testid="z-report-close-btn"><X size={20} className="text-[#A1A1AA]" /></button>
+        </div>
+        <div className="bg-white text-black rounded-lg p-5 font-mono text-sm" data-testid="z-report-receipt">
+          <div className="text-center font-bold text-base">Z-ОТЧЁТ</div>
+          <div className="text-center text-xs mb-2">{(user.restaurant_name || "RestoControl")}</div>
+          <div className="border-t border-dashed border-black my-2" />
+          <div className="flex justify-between"><span>Открыта</span><span>{(zReport.opened_at || "").slice(0, 16).replace("T", " ")}</span></div>
+          <div className="flex justify-between"><span>Закрыта</span><span>{(zReport.closed_at || "").slice(0, 16).replace("T", " ")}</span></div>
+          <div className="flex justify-between"><span>Чеков</span><span>{zReport.orders_count || 0}</span></div>
+          <div className="border-t border-dashed border-black my-2" />
+          <div className="font-bold">Выручка по способам оплаты:</div>
+          {Object.entries(zReport.totals_by_method || {}).map(([code, val]) => (
+            <div key={code} className="flex justify-between"><span>{methods.find((m) => m.code === code)?.name || code}</span><span>{money(val)}</span></div>
+          ))}
+          {Object.keys(zReport.totals_by_method || {}).length === 0 && <div className="text-center text-xs">— нет продаж —</div>}
+          <div className="flex justify-between font-bold mt-1"><span>ИТОГО ВЫРУЧКА</span><span>{money(zReport.total_sales)}</span></div>
+          {zReport.total_debt > 0 && <div className="flex justify-between"><span>В долг (не оплачено)</span><span>{money(zReport.total_debt)}</span></div>}
+          <div className="border-t border-dashed border-black my-2" />
+          <div className="font-bold">Касса (наличные):</div>
+          <div className="flex justify-between"><span>Продажи наличными</span><span>{money(zReport.total_cash)}</span></div>
+          <div className="flex justify-between"><span>Внесения</span><span>+{money(zReport.cash_in)}</span></div>
+          <div className="flex justify-between"><span>Изъятия</span><span>-{money(zReport.cash_out)}</span></div>
+          <div className="flex justify-between font-bold"><span>ОЖИДАЕМО В КАССЕ</span><span>{money(zReport.expected_cash)}</span></div>
+          {(zReport.movements || []).length > 0 && (
+            <>
+              <div className="border-t border-dashed border-black my-2" />
+              <div className="font-bold">Движения налички:</div>
+              {(zReport.movements || []).map((m, i) => (
+                <div key={i} className="flex justify-between text-xs">
+                  <span>{m.type === "in" ? "Внесение" : "Изъятие"}{m.reason ? ` (${m.reason})` : ""}</span>
+                  <span>{m.type === "in" ? "+" : "-"}{money(m.amount)}</span>
+                </div>
+              ))}
+            </>
+          )}
+          <div className="border-t border-dashed border-black my-2" />
+          <div className="text-center text-xs">Кассир: {user.name}</div>
+        </div>
+        <button onClick={() => window.print()} data-testid="z-report-print-btn"
+          className="w-full mt-4 bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E5FF] text-[#00E5FF] rounded-lg py-3 font-semibold flex items-center justify-center gap-2">
+          <Printer size={18} /> Печать
+        </button>
+      </div>
+    </div>
+  );
+
   if (shift === null) {
     return (
       <div className="h-screen flex flex-col items-center justify-center bg-[#0A0A0A]">
         <PosTopBar user={user} shift={shift} onLogout={() => { logout(); nav("/login"); }} onCloseShift={closeShift} floating />
+        {zReportModal}
         <div className="text-center fade-up">
           <div className="w-16 h-16 rounded-2xl bg-[#FF5A00] flex items-center justify-center mx-auto mb-6">
             <Power size={30} />
@@ -659,27 +715,20 @@ export default function Pos() {
               <button onClick={() => { setTickets(null); backToTables(); }} data-testid="tickets-close-btn"><X size={20} className="text-[#A1A1AA]" /></button>
             </div>
             <div className="space-y-4">
-              {Object.entries(tickets).map(([ws, items]) => {
-                const ordered = [...items].sort((a, b) => (a.course_number || 0) - (b.course_number || 0));
-                let prev = null;
-                return (
-                  <div key={ws} className="bg-white text-black rounded-lg p-4 font-mono text-sm">
-                    <div className="font-bold border-b border-dashed border-black pb-1 mb-2">ЦЕХ: {ws}</div>
-                    {ordered.map((it, i) => {
-                      const cn = it.course_number || 0;
-                      const header = cn && cn !== prev ? cn : null;
-                      prev = cn;
-                      return (
-                        <div key={i}>
-                          {header && <div className="font-bold text-center my-1">-- Подача {header} --</div>}
-                          <div className="flex justify-between"><span>{it.name}</span><span>×{it.count}</span></div>
-                          {it.comment && <div className="pl-3 text-[13px] italic">* {it.comment}</div>}
-                        </div>
-                      );
-                    })}
+              {(tickets || []).map((tk, ti) => (
+                <div key={ti} className="bg-white text-black rounded-lg p-4 font-mono text-sm" data-testid={`ticket-block-${ti}`}>
+                  <div className="font-bold border-b border-dashed border-black pb-1 mb-2 flex justify-between">
+                    <span>ЦЕХ: {tk.workshop}</span>
+                    {tk.course_number ? <span>Подача {tk.course_number}</span> : null}
                   </div>
-                );
-              })}
+                  {tk.items.map((it, i) => (
+                    <div key={i}>
+                      <div className="flex justify-between"><span>{it.name}</span><span>×{it.count}</span></div>
+                      {it.comment && <div className="pl-3 text-[13px] italic">* {it.comment}</div>}
+                    </div>
+                  ))}
+                </div>
+              ))}
               <button onClick={() => window.print()} data-testid="print-tickets-btn" className="w-full bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E5FF] text-[#00E5FF] rounded-lg py-3 font-semibold flex items-center justify-center gap-2">
                 <Printer size={18} /> Печать
               </button>
@@ -889,6 +938,8 @@ export default function Pos() {
           </div>
         </div>
       )}
+
+      {zReportModal}
 
       {/* Item comment modal (Задача 12) */}
       {commentFor !== null && (

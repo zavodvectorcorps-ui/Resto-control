@@ -1,0 +1,50 @@
+{
+  "summary": "Frontend-only E2E test of the 4 new enhancements (Z-отчёт, курсовая подача, история долга, экспорт CSV) plus POS regression. 3 of 4 features work fully. CRITICAL: the Z-report modal NEVER appears right after closing a shift — it only surfaces (stale) after the NEXT shift is opened, where it also blocks table clicks. Per-course kitchen tickets, debt history modal and all CSV exports work correctly.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "Pos.jsx — Z-отчёт modal",
+        "issue": "After clicking 'Закрыть смену' the shift closes (toast 'Смена закрыта. Выручка: 30.60 ₽') but [data-testid=z-report-modal] count = 0 — modal is never rendered. Cause: the `if (shift === null) return (...)` early-return branch (~L324-347) renders BEFORE the zReport JSX (~L889), so once refetchShift() sets shift=null the Z modal markup is unmounted/never reached. Verified twice (empty shift and shift with 2 sales).",
+        "selector": "[data-testid=\"z-report-modal\"]",
+        "priority": "CRITICAL"
+      },
+      {
+        "component": "Pos.jsx — stale Z-отчёт",
+        "issue": "Because zReport state is never cleared, the previous shift's Z-report modal pops up immediately AFTER the user opens the NEXT shift and its full-screen overlay (z-[70]) intercepts pointer events — table buttons cannot be clicked until it is manually closed. Playwright click on pos-table-* was blocked by <div class=\"fixed inset-0 z-[70] ...\">.",
+        "selector": "[data-testid=\"z-report-modal\"]",
+        "priority": "HIGH"
+      },
+      {
+        "component": "Clients.jsx — История долга",
+        "issue": "Transaction sub-label shows the raw payment-method code ('2026-08-27 00:16 · cash', '· debt') instead of the localized method name (Наличные/В долг). Russian UI consistency.",
+        "selector": "[data-testid=\"debt-tx-0\"]",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      { "screen": "/admin/reports", "issues": ["Leftover test data from earlier iterations visible in Маржинальность (product 'TEST_Блюдо_214934' with 0 cost / 100% margin) — consider cleanup of seeded TEST_ rows"] },
+      { "screen": "POS kitchen tickets", "issues": ["Seed data oddity: 'Греческий салат' is assigned to workshop 'Бар', so course-1 salad prints on the bar ticket (not a code defect, but demo data looks wrong)"] }
+    ]
+  },
+  "test_report_links": ["/app/test_reports/iteration_15.json"],
+  "action_items": [
+    "Pos.jsx: render the Z-report modal outside/above the `shift === null` early return (e.g. extract <ZReportModal/> and include it in BOTH branches) so it auto-appears right after closing the shift.",
+    "Pos.jsx: clear zReport (setZReport(null)) inside openShift() so a stale Z-report never blocks the new shift's table screen.",
+    "Optional: localize payment-method code in the debt-history rows (cash/debt -> Наличные/В долг).",
+    "Optional: wrap the `api.post(/orders/{id}/send)` call in sendKitchen() with try/catch — an error there currently rejects unhandled (no toast)."
+  ],
+  "critical_code_review_comments": [
+    "Pos.jsx is ~990 lines with 8+ inline modals; the early-return-for-no-shift pattern is exactly what broke the Z-report. Split modals into components rendered from a single root to avoid this class of bug.",
+    "sendKitchen() has no try/catch unlike every other mutation handler — inconsistent error handling."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "not tested (frontend-only request)", "frontend": "80% (4/5 feature areas pass; Z-report display broken)" },
+  "seed_data_creation": "Set course_number via API for demo purposes: category 'Салаты' -> 1, 'Бургеры' -> 2 (left in place so per-course tickets remain reproducible). Created and paid 3 test orders (cash/card) on Стол 1/3, plus cash movements +500 (размен) / -200 (инкассация) in a shift that was then closed. Shift left CLOSED at end of testing.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "test_credentials": "Manager admin@resto.com/admin123; POS PIN 2222 (admin), 1111 (waiter); client Иван Петров +7 900 123-45-67",
+  "context_for_next_testing_agent": "VERIFIED PASS: (1) Per-course kitchen tickets — 3 blocks returned/rendered: ticket-block-0 'ЦЕХ: Бар / Кола', block-1 'ЦЕХ: Бар Подача 1 / Греческий салат', block-2 'ЦЕХ: Кухня Подача 2 / Двойной бургер + * без лука'; course headers in cart (course-header-1/2) render. (2) Debt history: 19 debt-tx rows for Иван Петров with type/date/amount/остаток. (3) CSV export: downloads succeeded for corrections, promotions, sales_by_product, sales_by_client, margin; debts & refunds buttons correctly DISABLED (no rows); zero console errors. (4) Regression: stop-list toggle, modifiers, client lookup (10% discount auto-applied), bonus redeem cap hint, debt method disabled until client selected, service-charge toggle, cancel-order-with-reason, cash movements, shift math (18₽ item -15% promo = 15.30; expected cash 15.30+500-200=315.30) all correct. ONLY remaining bug: Z-report modal render placement (see ui_bugs). To see Z content today you must reopen the shift.",
+  "rca_of_the_issue": "closeShift() sets zReport and calls refetchShift(); shift becomes null, and Pos() then hits `if (shift === null) return (<no-shift screen/>)` which is declared before the zReport modal JSX. The Z modal therefore never mounts on close; it mounts only once a shift exists again (after 'Открыть смену'), showing the previous shift's data and blocking clicks via its fixed z-[70] overlay. Fix: hoist the Z modal above the early return and reset zReport in openShift()."
+}

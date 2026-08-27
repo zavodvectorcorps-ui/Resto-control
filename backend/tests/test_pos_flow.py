@@ -58,8 +58,9 @@ class TestPosFlow:
         body = s.json()
         assert body["success"] is True
         tickets = body["tickets"]
-        assert isinstance(tickets, dict) and len(tickets) >= 1
-        assert "Без цеха" not in tickets, f"workshop name unresolved: {tickets}"
+        assert isinstance(tickets, list) and len(tickets) >= 1
+        names = {t["workshop"] for t in tickets}
+        assert "Без цеха" not in names, f"workshop name unresolved: {tickets}"
         assert cashier.get(f"{API}/orders/{oid}", timeout=30).json()["status"] == "sent"
 
         before = admin.get(f"{API}/reports/dashboard", timeout=30).json()

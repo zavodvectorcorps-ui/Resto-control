@@ -1171,7 +1171,9 @@ async def close_shift(user: dict = Depends(get_current_user)):
             "orders_count": len(orders),
         }},
     )
-    return serialize(await db.shifts.find_one({"_id": shift["_id"]}))
+    result = serialize(await db.shifts.find_one({"_id": shift["_id"]}))
+    result["movements"] = [serialize(m) for m in movements]
+    return result
 
 
 @api.get("/shifts")
@@ -1303,15 +1305,19 @@ async def send_order(oid: str, user: dict = Depends(get_current_user)):
     workshops = {w["id"]: w for w in await list_docs("workshops", rid=user["restaurant_id"])}
     groups = {}
     for i in pending_idx:
-        groups.setdefault(items[i].get("workshop_id") or "none", []).append(i)
-    tickets = {}
+        wid = items[i].get("workshop_id") or "none"
+        cn = items[i].get("course_number") or 0
+        groups.setdefault((wid, cn), []).append(i)
+    tickets = []
     jobs = []
-    for wid, idxs in groups.items():
+    for (wid, cn), idxs in sorted(groups.items(), key=lambda kv: (kv[0][1], kv[0][0])):
         grp_items = [items[i] for i in idxs]
         wname = workshops.get(wid, {}).get("name", "Без цеха")
-        tickets[wname] = [{"name": items[i]["name"], "count": items[i]["count"],
-                           "course_number": items[i].get("course_number") or 0,
-                           "comment": items[i].get("comment")} for i in idxs]
+        tickets.append({
+            "workshop": wname,
+            "course_number": cn,
+            "items": [{"name": items[i]["name"], "count": items[i]["count"], "comment": items[i].get("comment")} for i in idxs],
+        })
         printer = await db.printers.find_one({"workshop_id": wid, "active": True, "restaurant_id": o.get("restaurant_id")}) if wid != "none" else None
         if printer:
             job = await make_job(o, printer, "ticket", grp_items)
