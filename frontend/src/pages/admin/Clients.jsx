@@ -59,39 +59,39 @@ export default function Clients() {
         action={<Btn onClick={() => { setForm({ discount_percent: 0 }); setModal(true); }} data-testid="add-client-btn"><Plus size={16} className="inline mr-1" /> Клиент</Btn>} />
 
       <div className="relative max-w-sm mb-6">
-        <Search size={16} className="absolute left-3 top-3 text-[#52525B]" />
+        <Search size={16} className="absolute left-3 top-3 text-[var(--ink-faint)]" />
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Поиск по имени или телефону" data-testid="client-search"
-          className="w-full bg-[#0A0A0A] border border-[#27272A] rounded-lg pl-9 pr-4 py-2.5 outline-none focus:border-[#FF5A00]" />
+          className="w-full bg-[var(--bg)] border border-[var(--border)] rounded-lg pl-9 pr-4 py-2.5 outline-none focus:border-[var(--accent)]" />
       </div>
 
-      <div className="bg-[#121212] border border-[#27272A] rounded-xl overflow-hidden">
+      <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl overflow-hidden">
         <table className="w-full text-sm">
-          <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
+          <thead><tr className="text-[var(--ink-dim)] text-xs uppercase border-b border-[var(--border)]">
             <th className="text-left p-4">Имя</th><th className="text-left p-4">Телефон</th><th className="text-right p-4">Скидка</th><th className="text-right p-4">Бонусы</th><th className="text-right p-4">Долг</th><th className="text-left p-4">Группа</th><th className="p-4"></th></tr></thead>
           <tbody>
             {shown.map((c) => (
-              <tr key={c.id} className="border-b border-[#1A1A1A] hover:bg-[#161616]" data-testid={`client-row-${c.id}`}>
+              <tr key={c.id} className="border-b border-[var(--surface-2)] hover:bg-[var(--surface-hover)]" data-testid={`client-row-${c.id}`}>
                 <td className="p-4 font-medium">{c.name}</td>
-                <td className="p-4 text-[#A1A1AA] tabnum">{c.phone}</td>
-                <td className="p-4 text-right tabnum text-[#FF5A00] font-semibold">{c.discount_percent}%</td>
-                <td className="p-4 text-right tabnum text-[#00E676]" data-testid={`client-bonus-${c.id}`}>{Number(c.bonus_balance || 0).toFixed(2)}</td>
+                <td className="p-4 text-[var(--ink-dim)] tabnum">{c.phone}</td>
+                <td className="p-4 text-right tabnum text-[var(--accent)] font-semibold">{c.discount_percent}%</td>
+                <td className="p-4 text-right tabnum text-[var(--success)]" data-testid={`client-bonus-${c.id}`}>{Number(c.bonus_balance || 0).toFixed(2)}</td>
                 <td className="p-4 text-right tabnum" data-testid={`client-debt-${c.id}`}>
                   {Number(c.debt_balance || 0) > 0
-                    ? <button onClick={() => { setDebtFor(c); setDebtAmt(String(c.debt_balance)); setDebtPm(methods.find((m) => !m.is_debt)?.code || "cash"); }} className="text-[#FF3B30] font-semibold hover:underline" data-testid={`pay-debt-${c.id}`}>{Number(c.debt_balance).toFixed(2)}</button>
-                    : <span className="text-[#52525B]">—</span>}
+                    ? <button onClick={() => { setDebtFor(c); setDebtAmt(String(c.debt_balance)); setDebtPm(methods.find((m) => !m.is_debt)?.code || "cash"); }} className="text-[var(--danger)] font-semibold hover:underline" data-testid={`pay-debt-${c.id}`}>{Number(c.debt_balance).toFixed(2)}</button>
+                    : <span className="text-[var(--ink-faint)]">—</span>}
                 </td>
-                <td className="p-4 text-[#A1A1AA] text-xs">{lgroups.find((g) => g.id === c.loyalty_group_id)?.name || "—"}</td>
+                <td className="p-4 text-[var(--ink-dim)] text-xs">{lgroups.find((g) => g.id === c.loyalty_group_id)?.name || "—"}</td>
                 <td className="p-4">
                   <div className="flex gap-2 justify-end">
-                    <button onClick={() => setHistoryFor(c)} className="text-[#A1A1AA] hover:text-[#C084FC]" data-testid={`debt-history-${c.id}`} title="История долга"><History size={16} /></button>
-                    <button onClick={() => { setBonusFor(c); setBonusAmt(""); }} className="text-[#00E676] hover:text-white text-xs font-semibold" data-testid={`bonus-client-${c.id}`}>± бонус</button>
-                    <button onClick={() => { setForm({ id: c.id, name: c.name, phone: c.phone, discount_percent: c.discount_percent, loyalty_group_id: c.loyalty_group_id, credit_limit: c.credit_limit ?? 0 }); setModal(true); }} className="text-[#A1A1AA] hover:text-white" data-testid={`edit-client-${c.id}`}><Pencil size={16} /></button>
-                    <button onClick={() => del(c.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-client-${c.id}`}><Trash2 size={16} /></button>
+                    <button onClick={() => setHistoryFor(c)} className="text-[var(--ink-dim)] hover:text-[var(--purple)]" data-testid={`debt-history-${c.id}`} title="История долга"><History size={16} /></button>
+                    <button onClick={() => { setBonusFor(c); setBonusAmt(""); }} className="text-[var(--success)] hover:text-[var(--ink)] text-xs font-semibold" data-testid={`bonus-client-${c.id}`}>± бонус</button>
+                    <button onClick={() => { setForm({ id: c.id, name: c.name, phone: c.phone, discount_percent: c.discount_percent, loyalty_group_id: c.loyalty_group_id, credit_limit: c.credit_limit ?? 0 }); setModal(true); }} className="text-[var(--ink-dim)] hover:text-[var(--ink)]" data-testid={`edit-client-${c.id}`}><Pencil size={16} /></button>
+                    <button onClick={() => del(c.id)} className="text-[var(--ink-dim)] hover:text-[var(--danger)]" data-testid={`del-client-${c.id}`}><Trash2 size={16} /></button>
                   </div>
                 </td>
               </tr>
             ))}
-            {shown.length === 0 && <tr><td colSpan="7" className="p-6 text-center text-[#52525B]">Клиентов нет</td></tr>}
+            {shown.length === 0 && <tr><td colSpan="7" className="p-6 text-center text-[var(--ink-faint)]">Клиентов нет</td></tr>}
           </tbody>
         </table>
       </div>
@@ -110,7 +110,7 @@ export default function Clients() {
 
       <Modal open={!!bonusFor} onClose={() => setBonusFor(null)} title={`Бонусы: ${bonusFor?.name || ""}`}>
         <div className="space-y-4">
-          <p className="text-sm text-[#A1A1AA]">Текущий баланс: <span className="text-[#00E676] tabnum font-semibold">{Number(bonusFor?.bonus_balance || 0).toFixed(2)}</span></p>
+          <p className="text-sm text-[var(--ink-dim)]">Текущий баланс: <span className="text-[var(--success)] tabnum font-semibold">{Number(bonusFor?.bonus_balance || 0).toFixed(2)}</span></p>
           <Field label="Изменение (+ начислить / − списать)" type="number" value={bonusAmt} onChange={(e) => setBonusAmt(e.target.value)} data-testid="bonus-amount-input" />
           <Btn onClick={adjustBonus} className="w-full" data-testid="save-bonus-btn">Применить</Btn>
         </div>
@@ -118,7 +118,7 @@ export default function Clients() {
 
       <Modal open={!!debtFor} onClose={() => setDebtFor(null)} title={`Погашение долга: ${debtFor?.name || ""}`}>
         <div className="space-y-4">
-          <p className="text-sm text-[#A1A1AA]">Задолженность: <span className="text-[#FF3B30] tabnum font-semibold">{Number(debtFor?.debt_balance || 0).toFixed(2)} ₽</span></p>
+          <p className="text-sm text-[var(--ink-dim)]">Задолженность: <span className="text-[var(--danger)] tabnum font-semibold">{Number(debtFor?.debt_balance || 0).toFixed(2)} ₽</span></p>
           <Field label="Сумма к погашению, ₽" type="number" value={debtAmt} onChange={(e) => setDebtAmt(e.target.value)} data-testid="debt-amount-input" />
           <SelectField label="Способ оплаты" value={debtPm} onChange={(e) => setDebtPm(e.target.value)} data-testid="debt-method-select"
             options={methods.filter((m) => !m.is_debt && m.active).map((m) => ({ value: m.code, label: m.name }))} />
@@ -127,20 +127,20 @@ export default function Clients() {
       </Modal>
       <Modal open={!!historyFor} onClose={() => setHistoryFor(null)} title={`История долга: ${historyFor?.name || ""}`}>
         <div className="space-y-3">
-          <p className="text-sm text-[#A1A1AA]">Текущий долг: <span className="text-[#FF3B30] tabnum font-semibold">{Number(historyFor?.debt_balance || 0).toFixed(2)} ₽</span></p>
+          <p className="text-sm text-[var(--ink-dim)]">Текущий долг: <span className="text-[var(--danger)] tabnum font-semibold">{Number(historyFor?.debt_balance || 0).toFixed(2)} ₽</span></p>
           <div className="max-h-80 overflow-y-auto" data-testid="debt-history-list">
-            {debtHistory.length === 0 && <p className="text-sm text-[#52525B] py-6 text-center">Операций по долгу нет</p>}
+            {debtHistory.length === 0 && <p className="text-sm text-[var(--ink-faint)] py-6 text-center">Операций по долгу нет</p>}
             {debtHistory.map((t, i) => (
-              <div key={i} className="flex items-center justify-between border-b border-[#1A1A1A] py-2.5" data-testid={`debt-tx-${i}`}>
+              <div key={i} className="flex items-center justify-between border-b border-[var(--surface-2)] py-2.5" data-testid={`debt-tx-${i}`}>
                 <div>
-                  <div className={`text-sm font-semibold ${t.type === "charge" ? "text-[#FF3B30]" : "text-[#00E676]"}`}>
+                  <div className={`text-sm font-semibold ${t.type === "charge" ? "text-[var(--danger)]" : "text-[var(--success)]"}`}>
                     {t.type === "charge" ? "Начисление (заказ)" : "Погашение"}
                   </div>
-                  <div className="text-xs text-[#52525B]">{(t.created_at || "").slice(0, 16).replace("T", " ")}{t.payment_method ? ` · ${methods.find((m) => m.code === t.payment_method)?.name || t.payment_method}` : ""}</div>
+                  <div className="text-xs text-[var(--ink-faint)]">{(t.created_at || "").slice(0, 16).replace("T", " ")}{t.payment_method ? ` · ${methods.find((m) => m.code === t.payment_method)?.name || t.payment_method}` : ""}</div>
                 </div>
                 <div className="text-right">
-                  <div className={`tabnum font-semibold ${t.type === "charge" ? "text-[#FF3B30]" : "text-[#00E676]"}`}>{t.type === "charge" ? "+" : "−"}{Number(t.amount || 0).toFixed(2)} ₽</div>
-                  <div className="text-xs text-[#52525B] tabnum">остаток {Number(t.balance_after || 0).toFixed(2)}</div>
+                  <div className={`tabnum font-semibold ${t.type === "charge" ? "text-[var(--danger)]" : "text-[var(--success)]"}`}>{t.type === "charge" ? "+" : "−"}{Number(t.amount || 0).toFixed(2)} ₽</div>
+                  <div className="text-xs text-[var(--ink-faint)] tabnum">остаток {Number(t.balance_after || 0).toFixed(2)}</div>
                 </div>
               </div>
             ))}

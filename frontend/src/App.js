@@ -14,6 +14,7 @@ import Clients from "@/pages/admin/Clients";
 import Loyalty from "@/pages/admin/Loyalty";
 import Reservations from "@/pages/admin/Reservations";
 import Settings from "@/pages/admin/Settings";
+import Finance from "@/pages/admin/Finance";
 import Pos from "@/pages/pos/Pos";
 
 function Protected({ roles, children }) {
@@ -66,6 +67,7 @@ export default function App() {
           <Route path="loyalty" element={<Loyalty />} />
           <Route path="reservations" element={<Reservations />} />
           <Route path="settings" element={<Settings />} />
+          <Route path="finance" element={<Finance />} />
           <Route path="reports" element={<Reports />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

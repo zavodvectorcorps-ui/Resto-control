@@ -7,9 +7,10 @@ import { usePosStore } from "@/store/posStore";
 import { toast } from "sonner";
 import {
   ChefHat, LogOut, Plus, Minus, Trash2, Send, CreditCard, Grid3x3,
-  ArrowLeft, Power, Printer, Banknote, X, Utensils,
+  ArrowLeft, Power, Printer, Banknote, X, Utensils, Search,
   Receipt, ArrowRightLeft, Scissors, Check, AlertTriangle, MessageSquare, Wallet,
 } from "lucide-react";
+import { FloorPlan, hallsOf } from "@/components/admin/FloorPlan";
 
 const money = (n) => `${Number(n || 0).toFixed(2)} ₽`;
 
@@ -20,7 +21,9 @@ export default function Pos() {
   const store = usePosStore();
 
   const [view, setView] = useState("tables"); // tables | order
+  const [activeHall, setActiveHall] = useState(null);
   const [activeCat, setActiveCat] = useState(null);
+  const [prodSearch, setProdSearch] = useState("");
   const [checkout, setCheckout] = useState(false);
   const [discount, setDiscount] = useState(0);
   const [pay, setPay] = useState("cash");
@@ -50,6 +53,13 @@ export default function Pos() {
   const [commentText, setCommentText] = useState("");
   const [zReport, setZReport] = useState(null);
   const [debtWarn, setDebtWarn] = useState(null);
+  const [discountRisk, setDiscountRisk] = useState(null); // orderId, если нужна причина скидки после пречека
+  const [discountRiskReason, setDiscountRiskReason] = useState("");
+  const [openCashPrompt, setOpenCashPrompt] = useState(false);
+  const [openingCashInput, setOpeningCashInput] = useState("");
+  const [closeCashPrompt, setCloseCashPrompt] = useState(false);
+  const [actualCashInput, setActualCashInput] = useState("");
+  const [mobileCartOpen, setMobileCartOpen] = useState(false);
 
   const toggleStop = async (p, e) => {
     e.stopPropagation();
@@ -61,7 +71,11 @@ export default function Pos() {
   };
 
   const { data: shift, refetch: refetchShift } = useQuery({ queryKey: ["shift"], queryFn: async () => (await api.get("/shifts/current")).data });
-  const { data: tables = [], refetch: refetchTables } = useQuery({ queryKey: ["pos-tables"], queryFn: async () => (await api.get("/tables")).data });
+  const { data: tables = [], refetch: refetchTables } = useQuery({ queryKey: ["pos-tables"], queryFn: async () => (await api.get("/tables")).data, refetchInterval: 4000 });
+  const posHalls = useMemo(() => hallsOf(tables), [tables]);
+  useEffect(() => {
+    if (posHalls.length && !posHalls.includes(activeHall)) setActiveHall(posHalls[0]);
+  }, [posHalls, activeHall]);
   const { data: categories = [] } = useQuery({ queryKey: ["categories"], queryFn: async () => (await api.get("/categories")).data });
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: async () => (await api.get("/products")).data });
   const { data: modGroups = [] } = useQuery({ queryKey: ["modifier-groups"], queryFn: async () => (await api.get("/modifier-groups")).data });
@@ -71,15 +85,26 @@ export default function Pos() {
   useEffect(() => { if (settings?.service_charge_default_enabled != null) setScEnabled(settings.service_charge_default_enabled); }, [settings]);
 
   const cat = activeCat || categories[0]?.id;
-  const shownProducts = useMemo(
-    () => products.filter((p) => p.for_sale !== false && (!cat || p.category_id === cat)),
-    [products, cat]
-  );
+  const searchQ = prodSearch.trim().toLowerCase();
+  const shownProducts = useMemo(() => {
+    if (searchQ) return products.filter((p) => p.for_sale !== false && p.name.toLowerCase().includes(searchQ));
+    return products.filter((p) => p.for_sale !== false && (!cat || p.category_id === cat));
+  }, [products, cat, searchQ]);
 
-  const openShift = async () => { setZReport(null); await api.post("/shifts/open"); refetchShift(); toast.success("Смена открыта"); };
-  const closeShift = async () => {
+  const openShift = () => { setZReport(null); setOpeningCashInput(""); setOpenCashPrompt(true); };
+  const confirmOpenShift = async () => {
+    await api.post("/shifts/open", { opening_cash: Number(openingCashInput || 0) });
+    setOpenCashPrompt(false);
+    refetchShift();
+    toast.success("Смена открыта");
+  };
+  const closeShift = () => { setActualCashInput(""); setCloseCashPrompt(true); };
+  const confirmCloseShift = async () => {
     try {
-      const { data } = await api.post("/shifts/close");
+      const { data } = await api.post("/shifts/close", {
+        actual_cash: actualCashInput === "" ? null : Number(actualCashInput),
+      });
+      setCloseCashPrompt(false);
       refetchShift();
       setZReport(data);
       toast.success(`Смена закрыта. Выручка: ${money(data.total_sales)}`);
@@ -284,7 +309,7 @@ export default function Pos() {
     return Math.max(0, afterDisc - bonus + sc);
   };
 
-  const executePay = async () => {
+  const executePay = async (riskReason) => {
     setDebtWarn(null);
     const id = await saveOrder();
     if (!id) return;
@@ -295,16 +320,26 @@ export default function Pos() {
         client_id: client?.id || null,
         discount_source: discountSource || (Number(discount) > 0 ? "manual" : null),
         bonus_redeem_amount: Number(bonusRedeem || 0),
+        reason: riskReason || undefined,
       });
       setReceipt(data);
       setCheckout(false);
       setDiscount(0); setClient(null); setClientPhone(""); setDiscountSource(null); setBonusRedeem("");
+      setDiscountRisk(null); setDiscountRiskReason("");
       store.clear();
       setView("tables");
       refetchTables();
       qc.invalidateQueries({ queryKey: ["dashboard"] });
       toast.success("Оплачено");
-    } catch (e) { toast.error(apiErr(e)); }
+    } catch (e) {
+      const msg = apiErr(e);
+      if (msg.includes("Пречек уже печатался")) {
+        setDiscountRisk(id);
+        setDiscountRiskReason("");
+        return;
+      }
+      toast.error(msg);
+    }
   };
 
   const doPay = async () => {
@@ -319,7 +354,7 @@ export default function Pos() {
     await executePay();
   };
 
-  const backToTables = () => { store.clear(); setView("tables"); refetchTables(); };
+  const backToTables = () => { store.clear(); setView("tables"); setMobileCartOpen(false); setProdSearch(""); refetchTables(); };
 
   const doCashMove = async () => {
     if (!(Number(cashAmt) > 0)) { toast.error("Введите сумму больше 0"); return; }
@@ -393,7 +428,15 @@ export default function Pos() {
           <div className="flex justify-between"><span>Продажи наличными</span><span>{money(zReport.total_cash)}</span></div>
           <div className="flex justify-between"><span>Внесения</span><span>+{money(zReport.cash_in)}</span></div>
           <div className="flex justify-between"><span>Изъятия</span><span>-{money(zReport.cash_out)}</span></div>
-          <div className="flex justify-between font-bold"><span>ОЖИДАЕМО В КАССЕ</span><span>{money(zReport.expected_cash)}</span></div>
+          <div className="flex justify-between font-bold"><span>ОЖИДАЕМО В КАССЕ (книжный)</span><span>{money(zReport.expected_cash)}</span></div>
+          {zReport.actual_cash != null && (
+            <>
+              <div className="flex justify-between"><span>Фактически пересчитано</span><span>{money(zReport.actual_cash)}</span></div>
+              <div className="flex justify-between font-bold" style={{ color: zReport.cash_diff ? "#CC0000" : "#008800" }}>
+                <span>Расхождение</span><span>{zReport.cash_diff > 0 ? "+" : ""}{money(zReport.cash_diff)}</span>
+              </div>
+            </>
+          )}
           {(zReport.movements || []).length > 0 && (
             <>
               <div className="border-t border-dashed border-black my-2" />
@@ -417,11 +460,43 @@ export default function Pos() {
     </div>
   );
 
+  const openCashModal = openCashPrompt && (
+    <div className="fixed inset-0 z-[70] bg-black/70 flex items-center justify-center p-4" onClick={() => setOpenCashPrompt(false)}>
+      <div className="w-full max-w-sm bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()} data-testid="open-cash-modal">
+        <h3 className="font-head text-xl font-bold mb-4">Остаток в кассе на начало смены</h3>
+        <input type="number" autoFocus value={openingCashInput} onChange={(e) => setOpeningCashInput(e.target.value)}
+          placeholder="0" data-testid="opening-cash-input"
+          className="w-full bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-3 text-lg outline-none focus:border-[#FF5A00] mb-4" />
+        <p className="text-xs text-[#A1A1AA] mb-4">Разменные деньги, которые физически лежат в кассе прямо сейчас. Нужны, чтобы при закрытии смены сверить книжный и фактический остаток.</p>
+        <button onClick={confirmOpenShift} data-testid="confirm-open-shift-btn"
+          className="w-full bg-[#FF5A00] hover:bg-[#E04F00] text-white rounded-lg py-3 font-semibold">Открыть смену</button>
+      </div>
+    </div>
+  );
+
+  const closeCashModal = closeCashPrompt && (
+    <div className="fixed inset-0 z-[70] bg-black/70 flex items-center justify-center p-4" onClick={() => setCloseCashPrompt(false)}>
+      <div className="w-full max-w-sm bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()} data-testid="close-cash-modal">
+        <h3 className="font-head text-xl font-bold mb-4">Сколько наличных в кассе?</h3>
+        <input type="number" autoFocus value={actualCashInput} onChange={(e) => setActualCashInput(e.target.value)}
+          placeholder="Пересчитайте и введите сумму" data-testid="actual-cash-input"
+          className="w-full bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-3 text-lg outline-none focus:border-[#FF5A00] mb-4" />
+        <p className="text-xs text-[#A1A1AA] mb-4">Можно оставить пустым, если не сверяете — тогда расхождение не покажется в Z-отчёте.</p>
+        <div className="flex gap-3">
+          <button onClick={() => setCloseCashPrompt(false)} className="flex-1 bg-[#1A1A1A] border border-[#27272A] rounded-lg py-3 font-semibold text-[#A1A1AA]">Отмена</button>
+          <button onClick={confirmCloseShift} data-testid="confirm-close-shift-btn"
+            className="flex-1 bg-[#FF5A00] hover:bg-[#E04F00] text-white rounded-lg py-3 font-semibold">Закрыть смену</button>
+        </div>
+      </div>
+    </div>
+  );
+
   if (shift === null) {
     return (
-      <div className="h-screen flex flex-col items-center justify-center bg-[#0A0A0A]">
+      <div className="h-screen flex flex-col items-center justify-center bg-[#0A0A0A] text-white">
         <PosTopBar user={user} shift={shift} onLogout={() => { logout(); nav("/login"); }} onCloseShift={closeShift} floating />
         {zReportModal}
+        {openCashModal}
         <div className="text-center fade-up">
           <div className="w-16 h-16 rounded-2xl bg-[#FF5A00] flex items-center justify-center mx-auto mb-6">
             <Power size={30} />
@@ -443,45 +518,188 @@ export default function Pos() {
     );
   }
 
+  const cartPanel = (
+    <>
+      <div className="px-5 py-4 border-b border-[#27272A] flex items-center justify-between">
+        <h3 className="font-head font-bold text-lg">Заказ · {store.tableName}</h3>
+        <button onClick={() => setMobileCartOpen(false)} className="md:hidden text-[#A1A1AA] hover:text-white" data-testid="mobile-cart-close-btn"><X size={20} /></button>
+      </div>
+      <div className="flex-1 overflow-y-auto p-4 space-y-2">
+        {store.cart.length === 0 && <p className="text-[#52525B] text-sm text-center mt-8">Добавьте позиции из меню</p>}
+        {(() => {
+          let prevCourse = null;
+          return cartOrdered.map(({ it, index }) => {
+            const printed = it.print_status === "printed";
+            const cn = it.course_number || 0;
+            const header = cn && cn !== prevCourse ? cn : null;
+            prevCourse = cn;
+            return (
+              <div key={index}>
+                {header && (
+                  <div className="flex items-center justify-between px-1 pt-1" data-testid={`course-header-${header}`}>
+                    <span className="text-xs uppercase tracking-wider text-[#C084FC] font-bold">— Подача {header} —</span>
+                    {courseHasPending[header] && (
+                      <button onClick={() => fireCourse(header)} data-testid={`fire-course-${header}`}
+                        className="text-[11px] font-semibold px-2 py-1 rounded-md border border-[#00E5FF] text-[#00E5FF] hover:bg-[#00E5FF11] flex items-center gap-1 active:scale-95 transition-transform">
+                        <Send size={12} /> Отправить подачу
+                      </button>
+                    )}
+                  </div>
+                )}
+                <div className="bg-[#1A1A1A] border border-[#27272A] rounded-lg p-3" data-testid={`cart-item-${index}`}>
+                  <div className="flex justify-between items-start mb-2">
+                    <span className="text-sm font-medium flex items-center gap-2">
+                      {it.name}
+                      {printed && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#00E5FF11] text-[#00E5FF] font-semibold">отправлено</span>}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button onClick={() => openComment(index)} className="text-[#A1A1AA] hover:text-[#A855F7]" data-testid={`comment-${index}`} title="Комментарий"><MessageSquare size={14} /></button>
+                      <button onClick={() => requestVoid(index, it)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`void-${index}`} title={printed ? "Сторно" : "Удалить"}><Trash2 size={14} /></button>
+                    </div>
+                  </div>
+                  {(it.selected_modifiers || []).length > 0 && (
+                    <div className="mb-2 pl-2 border-l-2 border-[#27272A] space-y-0.5" data-testid={`cart-mods-${index}`}>
+                      {(it.selected_modifiers || []).map((m, mi) => (
+                        <div key={mi} className="text-[11px] text-[#A1A1AA] flex justify-between">
+                          <span>+ {m.name}</span>
+                          {m.price_delta ? <span className="tabnum text-[#52525B]">+{money(m.price_delta)}</span> : null}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {it.comment && (
+                    <div className="mb-2 text-xs text-[#C084FC] bg-[#C084FC11] rounded px-2 py-1 italic" data-testid={`cart-comment-${index}`}>✎ {it.comment}</div>
+                  )}
+                  <div className="flex justify-between items-center">
+                    {printed ? (
+                      <span className="text-sm text-[#A1A1AA] tabnum">× {it.count}</span>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => store.changeCount(index, -1)} data-testid={`dec-${index}`}
+                          className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Minus size={14} /></button>
+                        <span className="w-6 text-center tabnum">{it.count}</span>
+                        <button onClick={() => store.changeCount(index, 1)} data-testid={`inc-${index}`}
+                          className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Plus size={14} /></button>
+                      </div>
+                    )}
+                    <span className="tabnum font-semibold text-[#FF5A00]">{money((it.price + (it.selected_modifiers || []).reduce((a, m) => a + (m.price_delta || 0), 0)) * it.count)}</span>
+                  </div>
+                </div>
+              </div>
+            );
+          });
+        })()}
+      </div>
+      <div className="border-t border-[#27272A] p-4 space-y-3">
+        <div className="flex justify-between text-lg font-head font-bold">
+          <span>Итого</span>
+          <span className="tabnum text-[#FF5A00]" data-testid="cart-total">{money(subtotal)}</span>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <button onClick={requestBill} disabled={store.cart.length === 0} data-testid="request-bill-btn"
+            className="bg-[#1A1A1A] border border-[#27272A] hover:border-[#FACC15] text-[#FACC15] rounded-lg py-2.5 text-xs font-semibold active:scale-95 transition-transform disabled:opacity-40 flex flex-col items-center gap-1">
+            <Receipt size={16} /> Счёт
+          </button>
+          <button onClick={() => setMoveOpen(true)} disabled={!store.orderId && store.cart.length === 0} data-testid="move-btn"
+            className="bg-[#1A1A1A] border border-[#27272A] hover:border-[#A855F7] text-[#A855F7] rounded-lg py-2.5 text-xs font-semibold active:scale-95 transition-transform disabled:opacity-40 flex flex-col items-center gap-1">
+            <ArrowRightLeft size={16} /> Перенос
+          </button>
+          <button onClick={() => { setSplitSel({}); setSplitOpen(true); }} disabled={store.cart.length < 2} data-testid="split-btn"
+            className="bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E676] text-[#00E676] rounded-lg py-2.5 text-xs font-semibold active:scale-95 transition-transform disabled:opacity-40 flex flex-col items-center gap-1">
+            <Scissors size={16} /> Разделить
+          </button>
+        </div>
+        {store.orderId && (
+          <button onClick={() => { setCancelReason(""); setCancelOpen(true); }} data-testid="cancel-order-btn"
+            className="w-full bg-[#1A1A1A] border border-[#27272A] hover:border-[#FF3B30] text-[#FF3B30] rounded-lg py-2 text-xs font-semibold active:scale-95 transition-transform flex items-center justify-center gap-2">
+            <X size={14} /> Отменить заказ
+          </button>
+        )}
+        <button onClick={sendKitchen} disabled={store.cart.length === 0} data-testid="send-kitchen-btn"
+          className="w-full bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E5FF] text-[#00E5FF] rounded-lg py-3 font-semibold active:scale-95 transition-transform disabled:opacity-40 flex items-center justify-center gap-2">
+          <Send size={18} /> Отправить на кухню
+        </button>
+        {canPay && (
+          <button onClick={() => setCheckout(true)} disabled={store.cart.length === 0} data-testid="checkout-btn"
+            className="w-full bg-[#FF5A00] hover:bg-[#E04F00] text-white rounded-lg py-3.5 font-semibold active:scale-95 transition-transform disabled:opacity-40 flex items-center justify-center gap-2">
+            <CreditCard size={18} /> Оплатить
+          </button>
+        )}
+      </div>
+    </>
+  );
+
   return (
-    <div className="h-screen flex flex-col bg-[#0A0A0A] overflow-hidden">
+    <div className="h-screen flex flex-col bg-[#0A0A0A] text-white overflow-hidden">
       <PosTopBar user={user} shift={shift} onLogout={() => { logout(); nav("/login"); }} onCloseShift={closeShift} onCash={() => { setCashAmt(""); setCashReason(""); setCashMove({ type: "in" }); }} />
 
       {view === "tables" ? (
-        <div className="flex-1 overflow-y-auto p-8">
-          <h2 className="font-head text-2xl font-bold mb-6">Выберите стол</h2>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-            {tables.map((t) => (
-              <button key={t.id} onClick={() => selectTable(t)} data-testid={`pos-table-${t.id}`}
-                className={`rounded-xl p-6 border text-left active:scale-95 transition-transform ${
-                  t.open_order ? "border-[#FF5A00] bg-[#1A1206]" : "border-[#27272A] bg-[#121212] hover:border-[#FF5A00]"
-                }`}>
-                <Grid3x3 size={22} className="text-[#A1A1AA] mb-3" />
-                <div className="font-head font-bold text-lg">{t.name}</div>
-                {t.open_orders && t.open_orders.length ? (
-                  <div className="text-sm text-[#FF5A00] font-semibold mt-1 tabnum">
-                    {money(t.open_total)}{t.open_orders.length > 1 ? ` · ${t.open_orders.length} счёта` : ""}
-                  </div>
-                ) : (
-                  <div className="text-sm text-[#52525B] mt-1">Свободен</div>
-                )}
-              </button>
-            ))}
+        <div className="flex-1 flex flex-col overflow-hidden p-5 pb-4">
+          <div className="flex items-center justify-between mb-4 shrink-0">
+            <h2 className="font-head text-xl font-bold">Выберите стол</h2>
+            {posHalls.length > 1 && (
+              <div className="flex bg-[#121212] border border-[#27272A] rounded-lg p-1" data-testid="pos-hall-tabs">
+                {posHalls.map((hall) => (
+                  <button key={hall} onClick={() => setActiveHall(hall)} data-testid={`pos-hall-tab-${hall}`}
+                    className={`px-5 py-2 rounded-md text-sm font-semibold transition-colors ${
+                      activeHall === hall ? "bg-[#FF5A00] text-white" : "text-[#A1A1AA] hover:text-white"
+                    }`}>
+                    {hall}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="flex-1 min-h-0 flex items-center justify-center">
+            {activeHall && (
+              <FloorPlan hall={activeHall} tables={tables.filter((t) => t.hall === activeHall)} mode="select" variant="pos" fit="height"
+                isMine={(t) => t.open_order?.waiter_id === user.id}
+                onSelect={selectTable}
+                renderExtra={(t) => t.open_orders && t.open_orders.length ? (
+                  <>
+                    <div className="text-[11px] font-semibold tabnum text-inherit">
+                      {money(t.open_total)}{t.open_orders.length > 1 ? ` · ${t.open_orders.length}сч` : ""}
+                    </div>
+                  </>
+                ) : !t.is_service ? (
+                  <div className="text-[10px] text-[#52525B]">своб.</div>
+                ) : null}
+              />
+            )}
           </div>
         </div>
       ) : (
-        <div className="flex-1 flex overflow-hidden">
-          {/* Left: categories */}
-          <div className="w-[18%] min-w-[160px] border-r border-[#27272A] flex flex-col">
+        <>
+        <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+          {/* Left: categories (desktop) */}
+          <div className="hidden md:flex w-[18%] min-w-[160px] border-r border-[#27272A] flex-col">
             <button onClick={backToTables} data-testid="pos-back-btn"
               className="flex items-center gap-2 px-4 py-4 text-[#A1A1AA] hover:text-white border-b border-[#27272A]">
               <ArrowLeft size={18} /> {store.tableName}
             </button>
             <div className="flex-1 overflow-y-auto p-2 space-y-1">
               {categories.map((c) => (
-                <button key={c.id} onClick={() => setActiveCat(c.id)} data-testid={`pos-cat-${c.id}`}
+                <button key={c.id} onClick={() => { setActiveCat(c.id); setProdSearch(""); }} data-testid={`pos-cat-${c.id}`}
                   className={`w-full text-left px-4 py-3 rounded-lg text-sm font-medium transition-colors ${
-                    cat === c.id ? "bg-[#1A1A1A] text-white border-l-2 border-[#FF5A00]" : "text-[#A1A1AA] hover:bg-[#121212]"
+                    !searchQ && cat === c.id ? "bg-[#1A1A1A] text-white border-l-2 border-[#FF5A00]" : "text-[#A1A1AA] hover:bg-[#121212]"
+                  }`}>
+                  {c.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Top: back + horizontal category chips (mobile) */}
+          <div className="md:hidden border-b border-[#27272A] shrink-0">
+            <button onClick={backToTables} data-testid="pos-back-btn-mobile"
+              className="flex items-center gap-2 px-4 py-3 text-[#A1A1AA] hover:text-white">
+              <ArrowLeft size={18} /> {store.tableName}
+            </button>
+            <div className="flex gap-2 overflow-x-auto px-3 pb-3">
+              {categories.map((c) => (
+                <button key={c.id} onClick={() => { setActiveCat(c.id); setProdSearch(""); }} data-testid={`pos-cat-mobile-${c.id}`}
+                  className={`shrink-0 px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap transition-colors ${
+                    !searchQ && cat === c.id ? "bg-[#FF5A00] text-white" : "bg-[#1A1A1A] text-[#A1A1AA] border border-[#27272A]"
                   }`}>
                   {c.name}
                 </button>
@@ -490,7 +708,13 @@ export default function Pos() {
           </div>
 
           {/* Center: products */}
-          <div className="flex-1 overflow-y-auto p-5">
+          <div className="flex-1 overflow-y-auto p-5 pb-24 md:pb-5">
+            <div className="relative mb-4">
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#52525B]" />
+              <input value={prodSearch} onChange={(e) => setProdSearch(e.target.value)} data-testid="pos-product-search"
+                placeholder="Поиск блюда по названию…"
+                className="w-full bg-[#1A1A1A] border border-[#27272A] rounded-lg pl-9 pr-4 py-3 text-sm outline-none focus:border-[#FF5A00]" />
+            </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
               {shownProducts.map((p) => (
                 <button key={p.id} onClick={() => onProductClick(p)} data-testid={`pos-product-${p.id}`}
@@ -505,119 +729,34 @@ export default function Pos() {
                   <span className="text-[#FF5A00] font-bold tabnum mt-auto">{money(p.price)}</span>
                 </button>
               ))}
-              {shownProducts.length === 0 && <p className="text-[#52525B] col-span-full">Нет позиций в категории</p>}
+              {shownProducts.length === 0 && (
+                <p className="text-[#52525B] col-span-full">{searchQ ? "Ничего не найдено" : "Нет позиций в категории"}</p>
+              )}
             </div>
           </div>
 
-          {/* Right: order ticket */}
-          <div className="w-[30%] min-w-[300px] border-l border-[#27272A] bg-[#121212] flex flex-col">
-            <div className="px-5 py-4 border-b border-[#27272A]">
-              <h3 className="font-head font-bold text-lg">Заказ · {store.tableName}</h3>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-2">
-              {store.cart.length === 0 && <p className="text-[#52525B] text-sm text-center mt-8">Добавьте позиции из меню</p>}
-              {(() => {
-                let prevCourse = null;
-                return cartOrdered.map(({ it, index }) => {
-                  const printed = it.print_status === "printed";
-                  const cn = it.course_number || 0;
-                  const header = cn && cn !== prevCourse ? cn : null;
-                  prevCourse = cn;
-                  return (
-                    <div key={index}>
-                      {header && (
-                        <div className="flex items-center justify-between px-1 pt-1" data-testid={`course-header-${header}`}>
-                          <span className="text-xs uppercase tracking-wider text-[#C084FC] font-bold">— Подача {header} —</span>
-                          {courseHasPending[header] && (
-                            <button onClick={() => fireCourse(header)} data-testid={`fire-course-${header}`}
-                              className="text-[11px] font-semibold px-2 py-1 rounded-md border border-[#00E5FF] text-[#00E5FF] hover:bg-[#00E5FF11] flex items-center gap-1 active:scale-95 transition-transform">
-                              <Send size={12} /> Отправить подачу
-                            </button>
-                          )}
-                        </div>
-                      )}
-                      <div className="bg-[#1A1A1A] border border-[#27272A] rounded-lg p-3" data-testid={`cart-item-${index}`}>
-                        <div className="flex justify-between items-start mb-2">
-                          <span className="text-sm font-medium flex items-center gap-2">
-                            {it.name}
-                            {printed && <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#00E5FF11] text-[#00E5FF] font-semibold">отправлено</span>}
-                          </span>
-                          <div className="flex items-center gap-2">
-                            <button onClick={() => openComment(index)} className="text-[#A1A1AA] hover:text-[#A855F7]" data-testid={`comment-${index}`} title="Комментарий"><MessageSquare size={14} /></button>
-                            <button onClick={() => requestVoid(index, it)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`void-${index}`} title={printed ? "Сторно" : "Удалить"}><Trash2 size={14} /></button>
-                          </div>
-                        </div>
-                        {(it.selected_modifiers || []).length > 0 && (
-                          <div className="mb-2 pl-2 border-l-2 border-[#27272A] space-y-0.5" data-testid={`cart-mods-${index}`}>
-                            {(it.selected_modifiers || []).map((m, mi) => (
-                              <div key={mi} className="text-[11px] text-[#A1A1AA] flex justify-between">
-                                <span>+ {m.name}</span>
-                                {m.price_delta ? <span className="tabnum text-[#52525B]">+{money(m.price_delta)}</span> : null}
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        {it.comment && (
-                          <div className="mb-2 text-xs text-[#C084FC] bg-[#C084FC11] rounded px-2 py-1 italic" data-testid={`cart-comment-${index}`}>✎ {it.comment}</div>
-                        )}
-                        <div className="flex justify-between items-center">
-                          {printed ? (
-                            <span className="text-sm text-[#A1A1AA] tabnum">× {it.count}</span>
-                          ) : (
-                            <div className="flex items-center gap-2">
-                              <button onClick={() => store.changeCount(index, -1)} data-testid={`dec-${index}`}
-                                className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Minus size={14} /></button>
-                              <span className="w-6 text-center tabnum">{it.count}</span>
-                              <button onClick={() => store.changeCount(index, 1)} data-testid={`inc-${index}`}
-                                className="w-7 h-7 rounded-md bg-[#0A0A0A] border border-[#27272A] flex items-center justify-center hover:border-[#FF5A00]"><Plus size={14} /></button>
-                            </div>
-                          )}
-                          <span className="tabnum font-semibold text-[#FF5A00]">{money((it.price + (it.selected_modifiers || []).reduce((a, m) => a + (m.price_delta || 0), 0)) * it.count)}</span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                });
-              })()}
-            </div>
-            <div className="border-t border-[#27272A] p-4 space-y-3">
-              <div className="flex justify-between text-lg font-head font-bold">
-                <span>Итого</span>
-                <span className="tabnum text-[#FF5A00]" data-testid="cart-total">{money(subtotal)}</span>
-              </div>
-              <div className="grid grid-cols-3 gap-2">
-                <button onClick={requestBill} disabled={store.cart.length === 0} data-testid="request-bill-btn"
-                  className="bg-[#1A1A1A] border border-[#27272A] hover:border-[#FACC15] text-[#FACC15] rounded-lg py-2.5 text-xs font-semibold active:scale-95 transition-transform disabled:opacity-40 flex flex-col items-center gap-1">
-                  <Receipt size={16} /> Счёт
-                </button>
-                <button onClick={() => setMoveOpen(true)} disabled={!store.orderId && store.cart.length === 0} data-testid="move-btn"
-                  className="bg-[#1A1A1A] border border-[#27272A] hover:border-[#A855F7] text-[#A855F7] rounded-lg py-2.5 text-xs font-semibold active:scale-95 transition-transform disabled:opacity-40 flex flex-col items-center gap-1">
-                  <ArrowRightLeft size={16} /> Перенос
-                </button>
-                <button onClick={() => { setSplitSel({}); setSplitOpen(true); }} disabled={store.cart.length < 2} data-testid="split-btn"
-                  className="bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E676] text-[#00E676] rounded-lg py-2.5 text-xs font-semibold active:scale-95 transition-transform disabled:opacity-40 flex flex-col items-center gap-1">
-                  <Scissors size={16} /> Разделить
-                </button>
-              </div>
-              {store.orderId && (
-                <button onClick={() => { setCancelReason(""); setCancelOpen(true); }} data-testid="cancel-order-btn"
-                  className="w-full bg-[#1A1A1A] border border-[#27272A] hover:border-[#FF3B30] text-[#FF3B30] rounded-lg py-2 text-xs font-semibold active:scale-95 transition-transform flex items-center justify-center gap-2">
-                  <X size={14} /> Отменить заказ
-                </button>
-              )}
-              <button onClick={sendKitchen} disabled={store.cart.length === 0} data-testid="send-kitchen-btn"
-                className="w-full bg-[#1A1A1A] border border-[#27272A] hover:border-[#00E5FF] text-[#00E5FF] rounded-lg py-3 font-semibold active:scale-95 transition-transform disabled:opacity-40 flex items-center justify-center gap-2">
-                <Send size={18} /> Отправить на кухню
-              </button>
-              {canPay && (
-                <button onClick={() => setCheckout(true)} disabled={store.cart.length === 0} data-testid="checkout-btn"
-                  className="w-full bg-[#FF5A00] hover:bg-[#E04F00] text-white rounded-lg py-3.5 font-semibold active:scale-95 transition-transform disabled:opacity-40 flex items-center justify-center gap-2">
-                  <CreditCard size={18} /> Оплатить
-                </button>
-              )}
-            </div>
+          {/* Right: order ticket (desktop, inline) */}
+          <div className="hidden md:flex w-[30%] min-w-[300px] border-l border-[#27272A] bg-[#121212] flex-col">
+            {cartPanel}
           </div>
         </div>
+
+        {/* Mobile: floating cart bar */}
+        {store.cart.length > 0 && !mobileCartOpen && (
+          <button onClick={() => setMobileCartOpen(true)} data-testid="mobile-cart-bar"
+            className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-[#FF5A00] text-white px-5 py-4 flex items-center justify-between font-semibold active:scale-[0.98] transition-transform">
+            <span className="flex items-center gap-2"><Receipt size={18} /> {store.cart.length} {store.cart.length === 1 ? "позиция" : "позиций"}</span>
+            <span className="tabnum">{money(subtotal)} · Корзина</span>
+          </button>
+        )}
+
+        {/* Mobile: fullscreen cart overlay */}
+        {mobileCartOpen && (
+          <div className="md:hidden fixed inset-0 z-40 bg-[#121212] flex flex-col">
+            {cartPanel}
+          </div>
+        )}
+        </>
       )}
 
       {/* Checkout modal */}
@@ -659,6 +798,20 @@ export default function Pos() {
                     Источник: {discountSource === "manual" ? "Ручная" : discountSource?.startsWith("client:") ? `Клиент (${client?.discount_percent || 0}%)` : "—"}
                   </p>
                 )}
+                {(() => {
+                  const eligibleSubtotal = store.cart.reduce((sum, it) => {
+                    const prod = products.find((p) => p.id === it.product_id);
+                    const eligible = prod ? (prod.discount_eligible ?? true) : true;
+                    if (!eligible) return sum;
+                    return sum + (it.price + (it.selected_modifiers || []).reduce((a, m) => a + (m.price_delta || 0), 0)) * it.count;
+                  }, 0);
+                  if (eligibleSubtotal >= subtotal) return null;
+                  return (
+                    <p className="text-[11px] text-[#FACC15] mt-1" data-testid="discount-cap-hint">
+                      На часть позиций скидка не действует — максимум {eligibleSubtotal.toFixed(2)} ₽
+                    </p>
+                  );
+                })()}
               </div>
               {Number(settings?.service_charge_percent) > 0 && (
                 <label className="flex items-center justify-between bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-3 cursor-pointer" data-testid="sc-toggle-row">
@@ -993,6 +1146,7 @@ export default function Pos() {
       )}
 
       {zReportModal}
+      {closeCashModal}
 
       {/* Debt credit-limit warning (Долг — лимит) */}
       {debtWarn && (
@@ -1006,8 +1160,26 @@ export default function Pos() {
             <div className="flex gap-3">
               <button onClick={() => setDebtWarn(null)} data-testid="debt-warn-cancel-btn"
                 className="flex-1 bg-[#1A1A1A] border border-[#27272A] hover:border-[#A1A1AA] text-white rounded-lg py-3 font-semibold">Отмена</button>
-              <button onClick={executePay} data-testid="debt-warn-confirm-btn"
+              <button onClick={() => executePay()} data-testid="debt-warn-confirm-btn"
                 className="flex-1 bg-[#FACC15] hover:bg-[#eab308] text-black rounded-lg py-3 font-semibold">Всё равно провести</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {discountRisk && (
+        <div className="fixed inset-0 z-[65] bg-black/70 flex items-center justify-center p-4" onClick={() => setDiscountRisk(null)}>
+          <div className="w-full max-w-sm bg-[#121212] border border-[#27272A] rounded-xl p-6 fade-up" onClick={(e) => e.stopPropagation()} data-testid="discount-risk-modal">
+            <div className="w-12 h-12 rounded-xl bg-[#FACC1511] text-[#FACC15] flex items-center justify-center mb-4"><AlertTriangle size={24} /></div>
+            <h3 className="font-head text-xl font-bold mb-2">Пречек уже печатался</h3>
+            <p className="text-sm text-[#A1A1AA] mb-4">Гостю уже показывали сумму на пречеке — теперь она меняется скидкой. Укажите причину, это попадёт в отчёт «Чеки с риском».</p>
+            <input value={discountRiskReason} onChange={(e) => setDiscountRiskReason(e.target.value)} autoFocus
+              placeholder="Причина скидки" data-testid="discount-risk-reason-input"
+              className="w-full bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-3 text-sm outline-none focus:border-[#FF5A00] mb-4" />
+            <div className="flex gap-3">
+              <button onClick={() => setDiscountRisk(null)} className="flex-1 bg-[#1A1A1A] border border-[#27272A] hover:border-[#A1A1AA] text-white rounded-lg py-3 font-semibold">Отмена</button>
+              <button onClick={() => executePay(discountRiskReason)} disabled={!discountRiskReason.trim()} data-testid="confirm-discount-risk-btn"
+                className="flex-1 bg-[#FACC15] hover:bg-[#eab308] disabled:opacity-40 text-black rounded-lg py-3 font-semibold">Оплатить со скидкой</button>
             </div>
           </div>
         </div>

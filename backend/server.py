@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta, date
 from bson import ObjectId
 import logging
 import time
+import math
 import base64
 import io
 import secrets
@@ -72,6 +73,14 @@ def now_utc() -> datetime:
 
 def iso(dt: datetime) -> str:
     return dt.isoformat()
+
+
+def cash_day_of(o: dict) -> str:
+    """Кассовый день заказа — дата ОТКРЫТИЯ смены, а не дата закрытия чека.
+    Нужен для заведений, работающих ночью: смена, открытая 27-го и закрытая
+    в час ночи 28-го, должна целиком попадать в отчёт за 27-е, а не
+    разрываться между двумя календарными датами по closed_at."""
+    return o.get("cash_day") or (o.get("closed_at") or o.get("created_at") or "")[:10]
 
 
 def serialize(doc: dict) -> dict:
@@ -179,7 +188,9 @@ async def get_current_user(request: Request) -> dict:
             raise HTTPException(status_code=401, detail="Пользователь не найден")
         user = serialize(user)
         user.pop("password_hash", None)
-        user["restaurant_id"] = user.get("restaurant_id") or payload.get("rid") or await get_default_rid()
+        # rid из токена — приоритет: именно так работает переключение заведения
+        # (сам документ пользователя хранит "домашний" restaurant_id и не меняется при свиче).
+        user["restaurant_id"] = payload.get("rid") or user.get("restaurant_id") or await get_default_rid()
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Срок действия сессии истёк")
@@ -205,6 +216,13 @@ class LoginReq(BaseModel):
 
 class PinLoginReq(BaseModel):
     pin: str
+    lat: Optional[float] = None  # геолокация телефона на момент входа (для гео-ограничения официантов)
+    lng: Optional[float] = None
+
+
+class TimeEntryEditReq(BaseModel):
+    clock_in: Optional[str] = None
+    clock_out: Optional[str] = None
 
 
 class RestaurantReq(BaseModel):
@@ -269,17 +287,36 @@ class ProductReq(BaseModel):
     measure: str = "pcs"
     image: Optional[str] = None
     for_sale: bool = True
+    discount_eligible: bool = True  # участвует ли позиция в ручной/клиентской скидке при оплате
     recipe: List[RecipeIngredient] = []
+    inventory_id: Optional[str] = None  # товар: продаётся напрямую со склада, без тех.карты
     modifier_group_ids: List[str] = []
     yield_g: Optional[float] = None
     preparation_notes: Optional[str] = ""
     course_number: Optional[int] = None  # переопределяет курс подачи категории
+
+    @model_validator(mode="after")
+    def _no_recipe_and_inventory_link(self):
+        if self.inventory_id and self.recipe:
+            raise ValueError("Товар (inventory_id) не может одновременно иметь тех.карту (recipe)")
+        return self
 
 
 class TableReq(BaseModel):
     name: str
     hall: str = "Основной зал"
     seats: int = 4
+    shape: str = "rect"  # rect | circle — форма на карте зала
+    pos_x: Optional[float] = None  # координаты и размер на карте зала, в px
+    pos_y: Optional[float] = None
+    width: Optional[float] = None
+    height: Optional[float] = None
+    is_service: bool = False  # служебный стол (учредители/партнёры/списание) — не для гостей, но заказы на нём учитываются в отчётах
+
+
+class CommissionRateReq(BaseModel):
+    category_id: Optional[str] = None  # None = ставка по умолчанию для всех остальных категорий
+    percent: float = 0
 
 
 class StaffReq(BaseModel):
@@ -288,12 +325,22 @@ class StaffReq(BaseModel):
     pin: Optional[str] = None
     email: Optional[str] = None
     password: Optional[str] = None
+    # Мотивация (по образцу Poster — Доступ → Должности → Зарплата):
+    commission_mode: str = "personal"  # personal (свои продажи) | shift (поровну между всеми в смене)
+    commission_rates: List[CommissionRateReq] = []  # ставка по каждой категории + опционально дефолтная (category_id=None)
 
     @field_validator("role")
     @classmethod
     def _check_role(cls, v):
         if v not in ("waiter", "admin", "manager"):
             raise ValueError("role должен быть waiter, admin или manager")
+        return v
+
+    @field_validator("commission_mode")
+    @classmethod
+    def _check_commission_mode(cls, v):
+        if v not in ("personal", "shift"):
+            raise ValueError("commission_mode должен быть personal или shift")
         return v
 
 
@@ -326,6 +373,8 @@ class OrderCreateReq(BaseModel):
 class OrderUpdateReq(BaseModel):
     items: List[OrderItemReq]
     client_id: Optional[str] = None
+    reason: Optional[str] = None  # причина, если среди изменений есть уменьшение/удаление уже отправленной позиции
+    confirm_pin: Optional[str] = None
 
 
 class PaymentReq(BaseModel):
@@ -334,6 +383,8 @@ class PaymentReq(BaseModel):
     client_id: Optional[str] = None
     discount_source: Optional[str] = None
     bonus_redeem_amount: float = 0.0
+    reason: Optional[str] = None  # обязательно, если скидка ставится после печати пречека
+    confirm_pin: Optional[str] = None  # PIN администратора/менеджера для того же случая
 
 
 class SupplierReq(BaseModel):
@@ -448,6 +499,31 @@ class InventoryItemReq(BaseModel):
     cost: float = 0.0
     warehouse_id: Optional[str] = None  # склад для начального остатка (по умолчанию — дефолтный)
     processing_loss: Optional[dict] = None  # {"cold":5,"boil":10,"fry":15,"stew":8,"bake":12} (%)
+    kind: str = "ingredient"  # ingredient (сырьё, приходуется накладными) | semi (полуфабрикат, приходуется производством)
+    recipe: List[RecipeIngredient] = []  # только для kind=semi: из чего и сколько нужно, чтобы произвести 1 ед.
+    cost_source: str = "manual"  # только для kind=semi: manual | auto (из recipe)
+    cost_method: str = "last"  # только для kind=ingredient: last (цена последнего прихода) | average (средневзвешенная)
+    min_balance: Optional[float] = None  # порог для уведомления "заканчивается на складе"; пусто = без порога
+
+    @field_validator("kind")
+    @classmethod
+    def _valid_kind(cls, v):
+        if v not in ("ingredient", "semi"):
+            raise ValueError("kind must be 'ingredient' or 'semi'")
+        return v
+
+    @field_validator("cost_method")
+    @classmethod
+    def _valid_cost_method(cls, v):
+        if v not in ("last", "average"):
+            raise ValueError("cost_method must be 'last' or 'average'")
+        return v
+
+
+class ProductionReq(BaseModel):
+    inventory_id: str  # полуфабрикат, который производим
+    amount: float  # сколько ед. производим
+    warehouse_id: Optional[str] = None
 
 
 class InvoiceItemReq(BaseModel):
@@ -470,6 +546,34 @@ class WriteOffReq(BaseModel):
     amount: float
     reason: str = "Списание"
     warehouse_id: Optional[str] = None  # склад списания (по умолчанию — дефолтный)
+
+
+class ShiftOpenReq(BaseModel):
+    opening_cash: float = 0  # остаток в кассе на начало смены (разменные деньги)
+
+
+class ShiftCloseReq(BaseModel):
+    actual_cash: Optional[float] = None  # фактически пересчитано в кассе; None = не сверяли
+
+
+class StocktakeStartReq(BaseModel):
+    warehouse_id: Optional[str] = None
+    responsible: Optional[str] = None  # если не задан — берём текущего пользователя
+
+
+class StocktakeCountReq(BaseModel):
+    inventory_id: str
+    counted_amount: float
+
+
+class StocktakeUpdateReq(BaseModel):
+    items: List[StocktakeCountReq]
+
+
+class RevalueReq(BaseModel):
+    inventory_id: str
+    new_cost: float
+    reason: str = ""
 
 
 class StockTransferReq(BaseModel):
@@ -540,6 +644,19 @@ class LogoReq(BaseModel):
     enabled: Optional[bool] = None
 
 
+class GeofenceSettingsReq(BaseModel):
+    enabled: bool = False
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    radius_m: float = 150
+
+    @model_validator(mode="after")
+    def _coords_required_if_enabled(self):
+        if self.enabled and (self.lat is None or self.lng is None):
+            raise ValueError("Укажите координаты заведения, чтобы включить гео-ограничение")
+        return self
+
+
 class ReceiptSettingsReq(BaseModel):
     name: Optional[str] = None
     address: Optional[str] = None
@@ -596,6 +713,56 @@ class PayDebtReq(BaseModel):
     payment_method: str = "cash"
 
 
+class AccountReq(BaseModel):
+    name: str
+    kind: str = "cash"  # cash | bank | safe | other
+    opening_balance: float = 0.0
+
+    @field_validator("kind")
+    @classmethod
+    def _valid_kind(cls, v):
+        if v not in ("cash", "bank", "safe", "other"):
+            raise ValueError("kind must be cash, bank, safe or other")
+        return v
+
+
+class ExpenseCategoryReq(BaseModel):
+    name: str
+    kind: str = "expense"  # expense | income
+
+    @field_validator("kind")
+    @classmethod
+    def _valid_kind(cls, v):
+        if v not in ("expense", "income"):
+            raise ValueError("kind must be expense or income")
+        return v
+
+
+class FinanceTxnReq(BaseModel):
+    type: str  # income | expense | transfer
+    account_id: str
+    to_account_id: Optional[str] = None
+    category_id: Optional[str] = None
+    amount: float
+    description: str = ""
+    date: Optional[str] = None  # YYYY-MM-DD, по умолчанию сегодня
+
+    @field_validator("type")
+    @classmethod
+    def _valid_type(cls, v):
+        if v not in ("income", "expense", "transfer"):
+            raise ValueError("type must be income, expense or transfer")
+        return v
+
+    @model_validator(mode="after")
+    def _validate(self):
+        if self.amount <= 0:
+            raise ValueError("Сумма должна быть больше нуля")
+        if self.type == "transfer" and not self.to_account_id:
+            raise ValueError("Для перевода укажите счёт назначения")
+        return self
+
+
 # ---------------------------------------------------------------------------
 # AUTH ROUTES
 # ---------------------------------------------------------------------------
@@ -615,13 +782,39 @@ async def login(req: LoginReq, request: Request):
     raise HTTPException(status_code=401, detail="Неверный email или пароль")
 
 
+def haversine_m(lat1, lng1, lat2, lng2) -> float:
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
 @api.post("/auth/pin-login")
 async def pin_login(req: PinLoginReq, request: Request):
     pin = req.pin.strip()
     key = f"pin:{pin}"
     user = await db.users.find_one({"pin": pin})
     if user:
+        if user.get("role") == "waiter":
+            geo = await db.settings.find_one({"key": "venue"}) or {}
+            if geo.get("geofence_enabled"):
+                if req.lat is None or req.lng is None:
+                    raise HTTPException(status_code=403, detail="Вход официанта возможен только с включённой геолокацией — разрешите доступ к местоположению в браузере")
+                dist = haversine_m(req.lat, req.lng, geo["geofence_lat"], geo["geofence_lng"])
+                radius = geo.get("geofence_radius_m", 150)
+                if dist > radius:
+                    raise HTTPException(status_code=403, detail=f"Вход возможен только на территории заведения (вы примерно в {int(dist)} м от заведения)")
         clear_fails(key)
+        if user.get("role") in ("waiter", "admin"):
+            rid = user.get("restaurant_id")
+            uid = str(user["_id"])
+            if not await db.time_entries.find_one({"staff_id": uid, "restaurant_id": rid, "clock_out": None}):
+                await db.time_entries.insert_one({
+                    "staff_id": uid, "staff_name": user.get("name", ""), "restaurant_id": rid,
+                    "clock_in": iso(now_utc()), "clock_out": None, "created_at": iso(now_utc()),
+                })
         token = create_token(str(user["_id"]), user["role"], user.get("restaurant_id"))
         u = serialize(user)
         u.pop("password_hash", None)
@@ -631,6 +824,54 @@ async def pin_login(req: PinLoginReq, request: Request):
     check_lock(key)
     pin_global_guard()
     raise HTTPException(status_code=401, detail="Неверный PIN-код")
+
+
+@api.post("/time-entries/clock-out")
+async def clock_out(user: dict = Depends(get_current_user)):
+    """Закрывает открытую личную смену текущего сотрудника (вызывается при выходе из системы)."""
+    rid = user["restaurant_id"]
+    entry = await db.time_entries.find_one({"staff_id": user["id"], "restaurant_id": rid, "clock_out": None})
+    if not entry:
+        return {"success": True, "closed": False}
+    await db.time_entries.update_one({"_id": entry["_id"]}, {"$set": {"clock_out": iso(now_utc())}})
+    return {"success": True, "closed": True}
+
+
+@api.get("/time-entries")
+async def get_time_entries(start: Optional[str] = None, end: Optional[str] = None,
+                           staff_id: Optional[str] = None, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    q = {"restaurant_id": rid}
+    if staff_id:
+        q["staff_id"] = staff_id
+    docs = [serialize(d) for d in await db.time_entries.find(q).sort("clock_in", -1).to_list(5000)]
+    if start:
+        docs = [d for d in docs if d["clock_in"][:10] >= start]
+    if end:
+        docs = [d for d in docs if d["clock_in"][:10] <= end]
+    return docs
+
+
+@api.put("/time-entries/{tid}")
+async def update_time_entry(tid: str, req: TimeEntryEditReq, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    upd = {}
+    if req.clock_in is not None:
+        upd["clock_in"] = req.clock_in
+    if "clock_out" in req.model_fields_set:
+        upd["clock_out"] = req.clock_out
+    r = await db.time_entries.update_one({"_id": parse_oid(tid), "restaurant_id": rid}, {"$set": upd})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Запись не найдена")
+    return serialize(await db.time_entries.find_one({"_id": parse_oid(tid), "restaurant_id": rid}))
+
+
+@api.delete("/time-entries/{tid}")
+async def delete_time_entry(tid: str, user: dict = Depends(require_roles("manager"))):
+    r = await db.time_entries.delete_one({"_id": parse_oid(tid), "restaurant_id": user["restaurant_id"]})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Запись не найдена")
+    return {"success": True}
 
 
 @api.get("/auth/me")
@@ -714,12 +955,33 @@ async def compute_product_cost(rid, recipe) -> float:
     return round(total, 2)
 
 
+async def compute_cost_for_product(rid, doc) -> float:
+    """cost_source=auto: товар берёт себестоимость напрямую со склада, блюдо — считает по тех.карте."""
+    if doc.get("inventory_id"):
+        inv = await db.inventory.find_one({"_id": parse_oid(doc["inventory_id"]), "restaurant_id": rid})
+        return round(inv.get("cost", 0), 2) if inv else 0.0
+    return await compute_product_cost(rid, doc.get("recipe", []))
+
+
 async def recompute_products_for_ingredients(rid, inventory_ids):
-    prods = await db.products.find(
-        {"restaurant_id": rid, "cost_source": "auto",
-         "recipe.inventory_id": {"$in": list(inventory_ids)}}).to_list(3000)
+    inventory_ids = list(inventory_ids)
+    # каскад: сырьё подорожало -> у полуфабрикатов на этом сырье пересчитываем себестоимость,
+    # и они тоже становятся "затронутыми" ингредиентами для блюд, которые их используют
+    semis = await db.inventory.find(
+        {"restaurant_id": rid, "kind": "semi", "cost_source": "auto",
+         "recipe.inventory_id": {"$in": inventory_ids}}).to_list(3000)
+    for s in semis:
+        c = await compute_product_cost(rid, s.get("recipe", []))
+        if c != s.get("cost"):
+            await db.inventory.update_one({"_id": s["_id"]}, {"$set": {"cost": c}})
+            inventory_ids.append(str(s["_id"]))
+
+    prods = await db.products.find({
+        "restaurant_id": rid, "cost_source": "auto",
+        "$or": [{"recipe.inventory_id": {"$in": inventory_ids}}, {"inventory_id": {"$in": inventory_ids}}],
+    }).to_list(3000)
     for p in prods:
-        c = await compute_product_cost(rid, p.get("recipe", []))
+        c = await compute_cost_for_product(rid, p)
         await db.products.update_one({"_id": p["_id"]}, {"$set": {"cost": c}})
 
 
@@ -815,7 +1077,12 @@ async def create_restaurant(req: RestaurantReq, user: dict = Depends(require_rol
     doc = {**req.model_dump(), "is_default": False, "created_at": iso(now_utc())}
     res = await db.restaurants.insert_one(doc)
     rid = str(res.inserted_id)
-    # Сид справочников для нового заведения (Задачи 12/14)
+    # Сид справочников для нового заведения: цех + склад по умолчанию — без них
+    # меню/склад не заработают, пока их не создать вручную.
+    ws = await db.workshops.insert_one({"name": "Кухня", "color": "#FF5A00", "restaurant_id": rid, "created_at": iso(now_utc())})
+    await db.warehouses.insert_one({
+        "name": "Склад", "workshop_id": str(ws.inserted_id), "is_default": True,
+        "restaurant_id": rid, "created_at": iso(now_utc())})
     await db.payment_methods.insert_many([
         {"name": "Наличные", "code": "cash", "is_debt": False, "active": True, "position": 1, "restaurant_id": rid, "created_at": iso(now_utc())},
         {"name": "Карта", "code": "card", "is_debt": False, "active": True, "position": 2, "restaurant_id": rid, "created_at": iso(now_utc())},
@@ -901,7 +1168,7 @@ async def create_product(req: ProductReq, user: dict = Depends(require_roles("ma
     rid = user["restaurant_id"]
     doc = {**req.model_dump(), "restaurant_id": rid, "created_at": iso(now_utc())}
     if doc.get("cost_source") == "auto":
-        doc["cost"] = await compute_product_cost(rid, doc.get("recipe", []))
+        doc["cost"] = await compute_cost_for_product(rid, doc)
     if req.yield_g is None:
         doc["yield_g"] = await compute_yield_g(rid, doc.get("recipe", []))
     res = await db.products.insert_one(doc)
@@ -913,7 +1180,7 @@ async def update_product(pid: str, req: ProductReq, user: dict = Depends(require
     rid = user["restaurant_id"]
     upd = req.model_dump()
     if upd.get("cost_source") == "auto":
-        upd["cost"] = await compute_product_cost(rid, upd.get("recipe", []))
+        upd["cost"] = await compute_cost_for_product(rid, upd)
     if req.yield_g is None:
         upd["yield_g"] = await compute_yield_g(rid, upd.get("recipe", []))
     await db.products.update_one({"_id": parse_oid(pid), "restaurant_id": rid}, {"$set": upd})
@@ -1044,7 +1311,11 @@ async def get_staff(user: dict = Depends(require_roles("manager"))):
 
 @api.post("/staff")
 async def create_staff(req: StaffReq, user: dict = Depends(require_roles("manager"))):
-    doc = {"name": req.name, "role": req.role, "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
+    doc = {
+        "name": req.name, "role": req.role, "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc()),
+        "commission_mode": req.commission_mode,
+        "commission_rates": [r.model_dump() for r in req.commission_rates],
+    }
     if req.role in ("waiter", "admin"):
         if not req.pin:
             raise HTTPException(status_code=400, detail="PIN обязателен для официанта/администратора")
@@ -1067,7 +1338,11 @@ async def update_staff(sid: str, req: StaffReq, user: dict = Depends(require_rol
     target = await db.users.find_one({"_id": parse_oid(sid), "restaurant_id": user["restaurant_id"]})
     if not target:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
-    setd = {"name": req.name, "role": req.role}
+    setd = {
+        "name": req.name, "role": req.role,
+        "commission_mode": req.commission_mode,
+        "commission_rates": [r.model_dump() for r in req.commission_rates],
+    }
     unsetd = {}
     if req.role == "manager":
         email = req.email or target.get("email")
@@ -1115,7 +1390,7 @@ async def current_shift(user: dict = Depends(get_current_user)):
 
 
 @api.post("/shifts/open")
-async def open_shift(user: dict = Depends(require_roles("admin"))):
+async def open_shift(req: ShiftOpenReq = ShiftOpenReq(), user: dict = Depends(require_roles("admin"))):
     existing = await db.shifts.find_one({"status": "open", "restaurant_id": user["restaurant_id"]})
     if existing:
         return serialize(existing)
@@ -1127,13 +1402,15 @@ async def open_shift(user: dict = Depends(require_roles("admin"))):
         "opened_by": user["id"],
         "opened_by_name": user.get("name", ""),
         "opened_at": iso(now_utc()),
+        "cash_day": now_utc().date().isoformat(),
+        "opening_cash": req.opening_cash,
     }
     res = await db.shifts.insert_one(doc)
     return serialize(await db.shifts.find_one({"_id": res.inserted_id}))
 
 
 @api.post("/shifts/close")
-async def close_shift(user: dict = Depends(get_current_user)):
+async def close_shift(req: ShiftCloseReq = ShiftCloseReq(), user: dict = Depends(get_current_user)):
     shift = await db.shifts.find_one({"status": "open", "restaurant_id": user["restaurant_id"]})
     if not shift:
         raise HTTPException(status_code=400, detail="Нет открытой смены")
@@ -1154,7 +1431,11 @@ async def close_shift(user: dict = Depends(get_current_user)):
     movements = await db.cash_movements.find({"shift_id": str(shift["_id"]), "restaurant_id": user["restaurant_id"]}).to_list(2000)
     cash_in = sum(m.get("amount", 0) for m in movements if m.get("type") == "in")
     cash_out = sum(m.get("amount", 0) for m in movements if m.get("type") == "out")
-    expected_cash = round(cash + cash_in - cash_out, 2)
+    opening_cash = shift.get("opening_cash", 0)
+    # Книжный баланс (как у Poster): остаток на начало + нал. продажи + внесения − изъятия.
+    expected_cash = round(opening_cash + cash + cash_in - cash_out, 2)
+    actual_cash = req.actual_cash
+    cash_diff = round(actual_cash - expected_cash, 2) if actual_cash is not None else None
     await db.shifts.update_one(
         {"_id": shift["_id"]},
         {"$set": {
@@ -1168,6 +1449,9 @@ async def close_shift(user: dict = Depends(get_current_user)):
             "totals_by_method": totals_by_method,
             "cash_in": round(cash_in, 2),
             "cash_out": round(cash_out, 2),
+            "opening_cash": opening_cash,
+            "actual_cash": actual_cash,
+            "cash_diff": cash_diff,
             "expected_cash": expected_cash,
             "orders_count": len(orders),
         }},
@@ -1236,11 +1520,22 @@ async def validate_and_price_items(rid, items):
 
 
 @api.get("/orders")
-async def get_orders(status: Optional[str] = None, user: dict = Depends(get_current_user)):
+async def get_orders(status: Optional[str] = None, table_id: Optional[str] = None,
+                     waiter_id: Optional[str] = None, start: Optional[str] = None,
+                     end: Optional[str] = None, user: dict = Depends(get_current_user)):
     q = {}
     if status:
         q["status"] = status
-    return await list_docs("orders", q, sort=[("created_at", -1)], rid=user["restaurant_id"])
+    if table_id:
+        q["table_id"] = table_id
+    if waiter_id:
+        q["waiter_id"] = waiter_id
+    docs = await list_docs("orders", q, sort=[("created_at", -1)], rid=user["restaurant_id"])
+    if start:
+        docs = [o for o in docs if cash_day_of(o) >= start]
+    if end:
+        docs = [o for o in docs if cash_day_of(o) <= end]
+    return docs
 
 
 @api.get("/orders/{oid}")
@@ -1270,6 +1565,7 @@ async def create_order(req: OrderCreateReq, user: dict = Depends(get_current_use
         "total": subtotal,
         "status": "open",
         "shift_id": str(shift["_id"]),
+        "cash_day": shift.get("cash_day") or (shift.get("opened_at") or "")[:10],
         "created_at": iso(now_utc()),
     }
     res = await db.orders.insert_one(doc)
@@ -1283,7 +1579,38 @@ async def update_order(oid: str, req: OrderUpdateReq, user: dict = Depends(get_c
         raise HTTPException(status_code=404, detail="Заказ не найден")
     if o["status"] == "closed":
         raise HTTPException(status_code=400, detail="Заказ уже закрыт")
-    items = [i.model_dump() for i in req.items]
+    old_items = o["items"]
+    new_items_raw = [i.model_dump() for i in req.items]
+    # защита от тихого занижения уже отправленных на кухню позиций (уменьшение кол-ва или полное выпадение из списка)
+    violations = []
+    for i, old in enumerate(old_items):
+        if old.get("print_status", "pending") == "pending":
+            continue
+        new = new_items_raw[i] if i < len(new_items_raw) else None
+        if new is None or new.get("product_id") != old.get("product_id"):
+            violations.append((old, old.get("count", 0)))
+        elif new.get("count", 0) < old.get("count", 0):
+            violations.append((old, old.get("count", 0) - new.get("count", 0)))
+    if violations:
+        reason = (req.reason or "").strip()
+        if not reason:
+            raise HTTPException(status_code=400, detail="Укажите причину уменьшения/удаления отправленной позиции")
+        if user["role"] in ("admin", "manager"):
+            confirmer = user
+        else:
+            pin = (req.confirm_pin or "").strip()
+            cu = await db.users.find_one({"pin": pin}) if pin else None
+            if not cu or cu.get("role") not in ("admin", "manager"):
+                raise HTTPException(status_code=403, detail="Требуется подтверждение администратора (PIN)")
+            confirmer = serialize(cu)
+        for old, delta in violations:
+            await db.order_corrections.insert_one({
+                "order_id": oid, "restaurant_id": user["restaurant_id"],
+                "item_name": old.get("name", ""), "item_price": round(old.get("price", 0) * delta, 2),
+                "staff_id": confirmer["id"], "staff_name": confirmer.get("name", ""),
+                "reason": reason, "created_at": iso(now_utc()),
+            })
+    items = new_items_raw
     items, subtotal = await validate_and_price_items(user["restaurant_id"], items)
     total = round(subtotal - o.get("discount", 0), 2)
     upd = {"items": items, "subtotal": subtotal, "total": total}
@@ -1346,11 +1673,36 @@ async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_role
         raise HTTPException(status_code=400, detail="Заказ уже оплачен")
     subtotal = o.get("subtotal", 0) or 0
 
+    # «Чеки с риском» (по образцу Poster): если пречек уже печатали, а сейчас
+    # ставят скидку — это меняет сумму уже показанного гостю чека, нужна причина.
+    risky_discount = req.discount > 0 and (o.get("precheck_print_count") or 0) > 0
+    if risky_discount:
+        reason = (req.reason or "").strip()
+        if not reason:
+            raise HTTPException(status_code=400, detail="Пречек уже печатался — укажите причину скидки")
+        await db.order_corrections.insert_one({
+            "order_id": str(o["_id"]), "restaurant_id": rid,
+            "item_name": "(скидка после печати пречека)", "item_price": req.discount,
+            "staff_id": user["id"], "staff_name": user.get("name", ""),
+            "reason": reason, "created_at": iso(now_utc()),
+        })
+
     # --- Акции: авто-применение к заказу ---
     items = list(o.get("items", []))
     prods = await db.products.find({"restaurant_id": rid}).to_list(3000)
     prod_cat = {str(p["_id"]): p.get("category_id") for p in prods}
     prod_name = {str(p["_id"]): p.get("name") for p in prods}
+    prod_discount_eligible = {str(p["_id"]): p.get("discount_eligible", True) for p in prods}
+
+    if req.discount > 0:
+        eligible_subtotal = sum(
+            it.get("total", it["price"] * it["count"]) for it in items
+            if prod_discount_eligible.get(it.get("product_id"), True)
+        )
+        if req.discount > eligible_subtotal + 0.01:
+            raise HTTPException(status_code=400,
+                detail=f"Скидка превышает сумму позиций, к которым она применима (доступно {round(eligible_subtotal, 2)} ₽ — на часть позиций скидка не действует)")
+
     now = now_utc()
     applied_promotions = []
     promo_discount = 0.0
@@ -1443,6 +1795,7 @@ async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_role
             "cashier_id": user["id"],
             "cashier_name": user.get("name", ""),
             "closed_at": iso(now_utc()),
+            "risk_discount_after_precheck": risky_discount,
         }},
     )
 
@@ -1486,6 +1839,19 @@ async def pay_order(oid: str, req: PaymentReq, user: dict = Depends(require_role
         if not prod:
             continue
         wh_id = await warehouse_for_workshop(rid, prod.get("workshop_id"))
+        # товар: прямая продажа со склада, без тех.карты
+        if prod.get("inventory_id") and not prod.get("recipe"):
+            inv = await db.inventory.find_one({"_id": parse_oid(prod["inventory_id"]), "restaurant_id": rid}) if ObjectId.is_valid(prod["inventory_id"]) else None
+            stock_unit = inv.get("measure", "kg") if inv else "kg"
+            amt = round(convert_amount(it["count"], prod.get("measure"), stock_unit), 4)
+            if amt > 0:
+                await adjust_stock(rid, prod["inventory_id"], wh_id, -amt)
+                await db.writeoffs.insert_one({
+                    "inventory_id": prod["inventory_id"], "name": prod["name"], "amount": amt,
+                    "restaurant_id": rid, "warehouse_id": wh_id, "kind": "sale",
+                    "reason": f"Продажа товара: {it['name']}", "created_by": user.get("name", ""),
+                    "created_at": iso(now_utc()),
+                })
         for ing in prod.get("recipe", []):
             if not ObjectId.is_valid(ing["inventory_id"]):
                 continue
@@ -1633,14 +1999,35 @@ async def get_inventory(user: dict = Depends(get_current_user)):
              "quantity": round(s.get("quantity", 0), 4)})
     for it in items:
         it["stocks"] = by_inv.get(it["id"], [])
+        mb = it.get("min_balance")
+        it["low_stock"] = mb is not None and it.get("balance", 0) < mb
     return items
+
+
+@api.get("/inventory/alerts")
+async def get_inventory_alerts(user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    items = await db.inventory.find({"restaurant_id": rid, "min_balance": {"$ne": None}}).to_list(5000)
+    low = [{"id": str(it["_id"]), "name": it["name"], "balance": round(it.get("balance", 0), 3),
+            "min_balance": it["min_balance"], "measure": it.get("measure", "kg")}
+           for it in items if it.get("balance", 0) < it["min_balance"]]
+    low.sort(key=lambda x: x["balance"] - x["min_balance"])
+    return low
 
 
 @api.post("/inventory")
 async def create_inventory(req: InventoryItemReq, user: dict = Depends(require_roles("manager"))):
     rid = user["restaurant_id"]
-    doc = {"name": req.name, "measure": req.measure, "cost": req.cost,
+    recipe = [i.model_dump() for i in req.recipe]
+    cost = req.cost
+    if req.kind == "semi" and req.cost_source == "auto":
+        cost = await compute_product_cost(rid, recipe)
+    doc = {"name": req.name, "measure": req.measure, "cost": cost,
            "balance": 0.0, "processing_loss": req.processing_loss,
+           "kind": req.kind, "recipe": recipe if req.kind == "semi" else [],
+           "cost_source": req.cost_source if req.kind == "semi" else "manual",
+           "cost_method": req.cost_method if req.kind == "ingredient" else "last",
+           "min_balance": req.min_balance,
            "restaurant_id": rid, "created_at": iso(now_utc())}
     res = await db.inventory.insert_one(doc)
     iid = str(res.inserted_id)
@@ -1653,12 +2040,65 @@ async def create_inventory(req: InventoryItemReq, user: dict = Depends(require_r
 @api.put("/inventory/{iid}")
 async def update_inventory(iid: str, req: InventoryItemReq, user: dict = Depends(require_roles("manager"))):
     rid = user["restaurant_id"]
+    recipe = [i.model_dump() for i in req.recipe]
+    cost = req.cost
+    if req.kind == "semi" and req.cost_source == "auto":
+        cost = await compute_product_cost(rid, recipe)
     await db.inventory.update_one(
         {"_id": parse_oid(iid), "restaurant_id": rid},
-        {"$set": {"name": req.name, "measure": req.measure, "cost": req.cost,
-                  "processing_loss": req.processing_loss}})
+        {"$set": {"name": req.name, "measure": req.measure, "cost": cost,
+                  "processing_loss": req.processing_loss, "kind": req.kind,
+                  "recipe": recipe if req.kind == "semi" else [],
+                  "cost_source": req.cost_source if req.kind == "semi" else "manual",
+                  "cost_method": req.cost_method if req.kind == "ingredient" else "last",
+                  "min_balance": req.min_balance}})
     await recompute_products_for_ingredients(rid, [iid])
     return serialize(await db.inventory.find_one({"_id": parse_oid(iid), "restaurant_id": rid}))
+
+
+@api.get("/production")
+async def get_production(user: dict = Depends(require_roles("manager"))):
+    return await list_docs("productions", sort=[("created_at", -1)], rid=user["restaurant_id"])
+
+
+@api.post("/production")
+async def produce(req: ProductionReq, user: dict = Depends(require_roles("manager"))):
+    """Производство: списывает сырьё по рецепту полуфабриката и приходует сам полуфабрикат."""
+    rid = user["restaurant_id"]
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="Количество должно быть больше нуля")
+    semi = await db.inventory.find_one({"_id": parse_oid(req.inventory_id), "restaurant_id": rid})
+    if not semi:
+        raise HTTPException(status_code=404, detail="Позиция склада не найдена")
+    if semi.get("kind") != "semi":
+        raise HTTPException(status_code=400, detail="Произвести можно только полуфабрикат")
+    if not semi.get("recipe"):
+        raise HTTPException(status_code=400, detail="У полуфабриката не задан рецепт")
+    warehouse_id = await resolve_warehouse(rid, req.warehouse_id)
+    consumed = []
+    for ing in semi["recipe"]:
+        if not ObjectId.is_valid(ing["inventory_id"]):
+            continue
+        inv = await db.inventory.find_one({"_id": ObjectId(ing["inventory_id"]), "restaurant_id": rid})
+        stock_unit = inv.get("measure", "kg") if inv else "kg"
+        per_unit = convert_amount(ing["amount"], ing.get("unit"), stock_unit)
+        amt = round(per_unit * req.amount, 4)
+        if amt <= 0:
+            continue
+        await adjust_stock(rid, ing["inventory_id"], warehouse_id, -amt)
+        consumed.append({"inventory_id": ing["inventory_id"], "name": ing["name"], "amount": amt})
+    await adjust_stock(rid, req.inventory_id, warehouse_id, req.amount)
+    if semi.get("cost_source") == "auto":
+        cost = await compute_product_cost(rid, semi.get("recipe", []))
+        await db.inventory.update_one({"_id": semi["_id"]}, {"$set": {"cost": cost}})
+    await recompute_products_for_ingredients(rid, [req.inventory_id])
+    doc = {
+        "inventory_id": req.inventory_id, "name": semi["name"], "amount": req.amount,
+        "warehouse_id": warehouse_id, "consumed": consumed,
+        "restaurant_id": rid, "created_by": user.get("name", ""), "created_at": iso(now_utc()),
+    }
+    res = await db.productions.insert_one(doc)
+    return serialize(await db.productions.find_one({"_id": res.inserted_id}))
 
 
 @api.delete("/inventory/{iid}")
@@ -1864,6 +2304,57 @@ async def refund_order(oid: str, req: RefundReq, user: dict = Depends(require_ro
             "order_id": oid, "restaurant_id": rid, "item_name": it["name"], "item_price": line,
             "staff_id": user["id"], "staff_name": user.get("name", ""),
             "reason": f"Возврат: {req.reason}", "created_at": iso(now_utc())})
+
+        # возврат ингредиентов на склад пропорционально возвращённому количеству
+        pid = it.get("product_id", "")
+        if ObjectId.is_valid(pid):
+            prod = await db.products.find_one({"_id": ObjectId(pid), "restaurant_id": rid})
+            if prod:
+                wh_id = await warehouse_for_workshop(rid, prod.get("workshop_id"))
+                if prod.get("inventory_id") and not prod.get("recipe"):
+                    inv = await db.inventory.find_one({"_id": parse_oid(prod["inventory_id"]), "restaurant_id": rid}) if ObjectId.is_valid(prod["inventory_id"]) else None
+                    stock_unit = inv.get("measure", "kg") if inv else "kg"
+                    amt = round(convert_amount(qty, prod.get("measure"), stock_unit), 4)
+                    if amt > 0:
+                        await adjust_stock(rid, prod["inventory_id"], wh_id, amt)
+                        await db.writeoffs.insert_one({
+                            "inventory_id": prod["inventory_id"], "name": prod["name"], "amount": -amt,
+                            "restaurant_id": rid, "warehouse_id": wh_id, "kind": "refund",
+                            "reason": f"Возврат товара: {it['name']}", "created_by": user.get("name", ""),
+                            "created_at": iso(now_utc())})
+                for ing in prod.get("recipe", []):
+                    if not ObjectId.is_valid(ing["inventory_id"]):
+                        continue
+                    inv = await db.inventory.find_one({"_id": ObjectId(ing["inventory_id"]), "restaurant_id": rid})
+                    stock_unit = inv.get("measure", "kg") if inv else "kg"
+                    per_portion = convert_amount(ing["amount"], ing.get("unit"), stock_unit)
+                    amt = round(per_portion * qty, 4)
+                    if amt <= 0:
+                        continue
+                    await adjust_stock(rid, ing["inventory_id"], wh_id, amt)
+                    await db.writeoffs.insert_one({
+                        "inventory_id": ing["inventory_id"], "name": ing["name"], "amount": -amt,
+                        "restaurant_id": rid, "warehouse_id": wh_id, "kind": "refund",
+                        "reason": f"Возврат: {it['name']}", "created_by": user.get("name", ""),
+                        "created_at": iso(now_utc())})
+                for m in it.get("selected_modifiers", []) or []:
+                    if not ObjectId.is_valid(m.get("option_id", "")):
+                        continue
+                    opt = await db.modifier_options.find_one({"_id": ObjectId(m["option_id"]), "restaurant_id": rid})
+                    if not opt or not opt.get("inventory_id") or not opt.get("amount"):
+                        continue
+                    inv = await db.inventory.find_one({"_id": ObjectId(opt["inventory_id"]), "restaurant_id": rid}) if ObjectId.is_valid(opt["inventory_id"]) else None
+                    stock_unit = inv.get("measure", "kg") if inv else "kg"
+                    per = convert_amount(opt["amount"], None, stock_unit)
+                    amt = round(per * qty, 4)
+                    if amt <= 0:
+                        continue
+                    await adjust_stock(rid, opt["inventory_id"], wh_id, amt)
+                    await db.writeoffs.insert_one({
+                        "inventory_id": opt["inventory_id"], "name": f"{opt['name']} (модификатор)", "amount": -amt,
+                        "restaurant_id": rid, "warehouse_id": wh_id, "kind": "refund",
+                        "reason": f"Возврат: {it['name']}", "created_by": user.get("name", ""),
+                        "created_at": iso(now_utc())})
     doc = {"order_id": oid, "restaurant_id": rid, "items": refunded, "reason": req.reason,
            "amount": round(amount, 2), "staff_id": user["id"], "staff_name": user.get("name", ""),
            "created_at": iso(now_utc())}
@@ -2088,6 +2579,138 @@ async def delete_payment_method(pmid: str, user: dict = Depends(require_roles("m
     return {"success": True}
 
 
+# ----- Финансы: счета, категории расходов/доходов, операции -----
+@api.get("/accounts")
+async def get_accounts(user: dict = Depends(require_roles("manager"))):
+    return await list_docs("accounts", sort=[("name", 1)], rid=user["restaurant_id"])
+
+
+@api.post("/accounts")
+async def create_account(req: AccountReq, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    doc = {"name": req.name, "kind": req.kind, "balance": round(req.opening_balance, 2),
+           "restaurant_id": rid, "created_at": iso(now_utc())}
+    res = await db.accounts.insert_one(doc)
+    return serialize(await db.accounts.find_one({"_id": res.inserted_id}))
+
+
+@api.put("/accounts/{aid}")
+async def update_account(aid: str, req: AccountReq, user: dict = Depends(require_roles("manager"))):
+    # opening_balance не редактируется задним числом — баланс дальше живёт через операции
+    r = await db.accounts.update_one({"_id": parse_oid(aid), "restaurant_id": user["restaurant_id"]},
+                                      {"$set": {"name": req.name, "kind": req.kind}})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Счёт не найден")
+    return serialize(await db.accounts.find_one({"_id": parse_oid(aid), "restaurant_id": user["restaurant_id"]}))
+
+
+@api.delete("/accounts/{aid}")
+async def delete_account(aid: str, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    if await db.finance_transactions.find_one({"restaurant_id": rid, "$or": [{"account_id": aid}, {"to_account_id": aid}]}):
+        raise HTTPException(status_code=400, detail="По счёту есть операции — сначала удалите или перенесите их")
+    r = await db.accounts.delete_one({"_id": parse_oid(aid), "restaurant_id": rid})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Счёт не найден")
+    return {"success": True}
+
+
+@api.get("/expense-categories")
+async def get_expense_categories(user: dict = Depends(require_roles("manager"))):
+    return await list_docs("expense_categories", sort=[("name", 1)], rid=user["restaurant_id"])
+
+
+@api.post("/expense-categories")
+async def create_expense_category(req: ExpenseCategoryReq, user: dict = Depends(require_roles("manager"))):
+    doc = {"name": req.name, "kind": req.kind, "restaurant_id": user["restaurant_id"], "created_at": iso(now_utc())}
+    res = await db.expense_categories.insert_one(doc)
+    return serialize(await db.expense_categories.find_one({"_id": res.inserted_id}))
+
+
+@api.put("/expense-categories/{cid}")
+async def update_expense_category(cid: str, req: ExpenseCategoryReq, user: dict = Depends(require_roles("manager"))):
+    r = await db.expense_categories.update_one({"_id": parse_oid(cid), "restaurant_id": user["restaurant_id"]},
+                                                {"$set": {"name": req.name, "kind": req.kind}})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Категория не найдена")
+    return serialize(await db.expense_categories.find_one({"_id": parse_oid(cid), "restaurant_id": user["restaurant_id"]}))
+
+
+@api.delete("/expense-categories/{cid}")
+async def delete_expense_category(cid: str, user: dict = Depends(require_roles("manager"))):
+    r = await db.expense_categories.delete_one({"_id": parse_oid(cid), "restaurant_id": user["restaurant_id"]})
+    if r.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Категория не найдена")
+    return {"success": True}
+
+
+async def adjust_account(rid, account_id, delta):
+    await db.accounts.update_one({"_id": parse_oid(account_id), "restaurant_id": rid}, {"$inc": {"balance": round(delta, 2)}})
+
+
+@api.get("/finance-transactions")
+async def get_finance_transactions(start: Optional[str] = None, end: Optional[str] = None,
+                                    account_id: Optional[str] = None, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    q = {"restaurant_id": rid}
+    if account_id:
+        q["$or"] = [{"account_id": account_id}, {"to_account_id": account_id}]
+    docs = [serialize(d) for d in await db.finance_transactions.find(q).sort("date", -1).to_list(5000)]
+    if start:
+        docs = [d for d in docs if d["date"] >= start]
+    if end:
+        docs = [d for d in docs if d["date"] <= end]
+    return docs
+
+
+@api.post("/finance-transactions")
+async def create_finance_txn(req: FinanceTxnReq, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    acc = await db.accounts.find_one({"_id": parse_oid(req.account_id), "restaurant_id": rid})
+    if not acc:
+        raise HTTPException(status_code=404, detail="Счёт не найден")
+    cat = await db.expense_categories.find_one({"_id": parse_oid(req.category_id), "restaurant_id": rid}) if req.category_id else None
+    to_acc = None
+    if req.type == "transfer":
+        to_acc = await db.accounts.find_one({"_id": parse_oid(req.to_account_id), "restaurant_id": rid})
+        if not to_acc:
+            raise HTTPException(status_code=404, detail="Счёт назначения не найден")
+    txn_date = req.date or now_utc().date().isoformat()
+    doc = {
+        "type": req.type, "account_id": req.account_id, "account_name": acc["name"],
+        "to_account_id": req.to_account_id, "to_account_name": to_acc["name"] if to_acc else None,
+        "category_id": req.category_id, "category_name": cat["name"] if cat else None,
+        "amount": round(req.amount, 2), "description": req.description, "date": txn_date,
+        "restaurant_id": rid, "created_by": user.get("name", ""), "created_at": iso(now_utc()),
+    }
+    res = await db.finance_transactions.insert_one(doc)
+    if req.type == "income":
+        await adjust_account(rid, req.account_id, req.amount)
+    elif req.type == "expense":
+        await adjust_account(rid, req.account_id, -req.amount)
+    else:
+        await adjust_account(rid, req.account_id, -req.amount)
+        await adjust_account(rid, req.to_account_id, req.amount)
+    return serialize(await db.finance_transactions.find_one({"_id": res.inserted_id}))
+
+
+@api.delete("/finance-transactions/{tid}")
+async def delete_finance_txn(tid: str, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    doc = await db.finance_transactions.find_one({"_id": parse_oid(tid), "restaurant_id": rid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Операция не найдена")
+    if doc["type"] == "income":
+        await adjust_account(rid, doc["account_id"], -doc["amount"])
+    elif doc["type"] == "expense":
+        await adjust_account(rid, doc["account_id"], doc["amount"])
+    else:
+        await adjust_account(rid, doc["account_id"], doc["amount"])
+        await adjust_account(rid, doc["to_account_id"], -doc["amount"])
+    await db.finance_transactions.delete_one({"_id": doc["_id"]})
+    return {"success": True}
+
+
 # ----- Долги клиентов (Задача 14) -----
 @api.post("/clients/{cid}/pay-debt")
 async def pay_debt(cid: str, req: PayDebtReq, user: dict = Depends(require_roles("manager", "admin"))):
@@ -2133,6 +2756,8 @@ async def get_invoices(user: dict = Depends(get_current_user)):
 
 @api.post("/invoices")
 async def create_invoice(req: InvoiceReq, user: dict = Depends(require_roles("manager"))):
+    """Создаёт накладную ЧЕРНОВИКОМ — на остатки склада пока не влияет.
+    Остатки двигаются только явным вызовом POST /invoices/{id}/post (Провести)."""
     rid = user["restaurant_id"]
     if await db.invoices.find_one({"number": req.number, "restaurant_id": rid}):
         raise HTTPException(status_code=400, detail="Накладная с таким номером уже существует")
@@ -2147,21 +2772,78 @@ async def create_invoice(req: InvoiceReq, user: dict = Depends(require_roles("ma
         "supplier_name": req.supplier_name,
         "items": items,
         "total": total,
+        "status": "draft",
         "created_by": user.get("name", ""),
         "created_at": iso(now_utc()),
     }
     res = await db.invoices.insert_one(doc)
-    # приход: увеличиваем остаток на складе накладной + обновляем себестоимость ингредиента
+    return serialize(await db.invoices.find_one({"_id": res.inserted_id}))
+
+
+@api.put("/invoices/{iid}")
+async def update_invoice(iid: str, req: InvoiceReq, user: dict = Depends(require_roles("manager"))):
+    """Редактирование доступно только для черновика — проведённую накладную не меняем задним числом."""
+    rid = user["restaurant_id"]
+    inv = await db.invoices.find_one({"_id": parse_oid(iid), "restaurant_id": rid})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Накладная не найдена")
+    if inv.get("status") == "posted":
+        raise HTTPException(status_code=400, detail="Накладная уже проведена — редактирование недоступно")
+    warehouse_id = await resolve_warehouse(rid, req.warehouse_id)
+    items = [i.model_dump() for i in req.items]
+    total = round(sum(i["amount"] * i["price"] for i in items), 2)
+    await db.invoices.update_one({"_id": inv["_id"]}, {"$set": {
+        "number": req.number, "warehouse_id": warehouse_id,
+        "supplier_id": req.supplier_id, "supplier_name": req.supplier_name,
+        "items": items, "total": total,
+    }})
+    return serialize(await db.invoices.find_one({"_id": inv["_id"]}))
+
+
+@api.delete("/invoices/{iid}")
+async def delete_invoice(iid: str, user: dict = Depends(require_roles("manager"))):
+    """Удалить можно только черновик. Проведённую накладную нужно сторнировать отдельным документом (списанием), а не стирать факт прихода."""
+    rid = user["restaurant_id"]
+    inv = await db.invoices.find_one({"_id": parse_oid(iid), "restaurant_id": rid})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Накладная не найдена")
+    if inv.get("status") == "posted":
+        raise HTTPException(status_code=400, detail="Накладная проведена — удаление недоступно")
+    await db.invoices.delete_one({"_id": inv["_id"]})
+    return {"ok": True}
+
+
+@api.post("/invoices/{iid}/post")
+async def post_invoice(iid: str, user: dict = Depends(require_roles("manager"))):
+    """Провести накладную: приходуем остаток на склад, обновляем себестоимость ингредиентов
+    и пересчитываем себестоимость блюд с cost_source=auto. Необратимо в рамках этого эндпоинта —
+    ошибку исправляют списанием, а не повторным проведением."""
+    rid = user["restaurant_id"]
+    inv = await db.invoices.find_one({"_id": parse_oid(iid), "restaurant_id": rid})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Накладная не найдена")
+    if inv.get("status") == "posted":
+        raise HTTPException(status_code=400, detail="Накладная уже проведена")
+    warehouse_id = inv["warehouse_id"]
     touched = set()
-    for it in items:
+    for it in inv["items"]:
+        item = await db.inventory.find_one({"_id": parse_oid(it["inventory_id"]), "restaurant_id": rid})
+        if item and item.get("cost_method") == "average":
+            old_balance = max(item.get("balance", 0), 0)
+            old_cost = item.get("cost", 0)
+            denom = old_balance + it["amount"]
+            new_cost = round((old_balance * old_cost + it["amount"] * it["price"]) / denom, 4) if denom > 0 else it["price"]
+        else:
+            new_cost = it["price"]
         await adjust_stock(rid, it["inventory_id"], warehouse_id, it["amount"])
         await db.inventory.update_one(
             {"_id": parse_oid(it["inventory_id"]), "restaurant_id": rid},
-            {"$set": {"cost": it["price"]}})
+            {"$set": {"cost": new_cost}})
         touched.add(it["inventory_id"])
-    # пересчёт себестоимости блюд с cost_source=auto, использующих эти ингредиенты
     await recompute_products_for_ingredients(rid, touched)
-    return serialize(await db.invoices.find_one({"_id": res.inserted_id}))
+    await db.invoices.update_one({"_id": inv["_id"]}, {"$set": {
+        "status": "posted", "posted_by": user.get("name", ""), "posted_at": iso(now_utc())}})
+    return serialize(await db.invoices.find_one({"_id": inv["_id"]}))
 
 
 @api.get("/writeoffs")
@@ -2198,13 +2880,173 @@ async def create_writeoff(req: WriteOffReq, user: dict = Depends(require_roles("
 
 
 # ---------------------------------------------------------------------------
+# ПЕРЕУЧЁТ / ИНВЕНТАРИЗАЦИЯ
+# ---------------------------------------------------------------------------
+@api.get("/stocktakes")
+async def list_stocktakes(user: dict = Depends(require_roles("manager"))):
+    return await list_docs("stocktakes", sort=[("created_at", -1)], rid=user["restaurant_id"])
+
+
+@api.get("/stocktakes/{sid}")
+async def get_stocktake(sid: str, user: dict = Depends(require_roles("manager"))):
+    doc = await db.stocktakes.find_one({"_id": parse_oid(sid), "restaurant_id": user["restaurant_id"]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Переучёт не найден")
+    return serialize(doc)
+
+
+@api.post("/stocktakes")
+async def start_stocktake(req: StocktakeStartReq, user: dict = Depends(require_roles("manager"))):
+    """Открывает переучёт: фиксирует системный остаток каждой позиции на складе
+    на момент начала сверки (period-of-record, как у Caffesta) — фактическое
+    количество вносится потом, до проведения снимок не меняется."""
+    rid = user["restaurant_id"]
+    warehouse_id = await resolve_warehouse(rid, req.warehouse_id)
+    items_all = await db.inventory.find({"restaurant_id": rid}).to_list(5000)
+    items = []
+    for it in items_all:
+        iid = str(it["_id"])
+        system_amount = await get_stock_qty(rid, iid, warehouse_id)
+        items.append({
+            "inventory_id": iid, "name": it["name"], "measure": it.get("measure", "kg"),
+            "system_amount": system_amount, "counted_amount": None, "diff": None,
+        })
+    doc = {
+        "restaurant_id": rid,
+        "warehouse_id": warehouse_id,
+        "responsible": req.responsible or user.get("name", ""),
+        "items": items,
+        "status": "draft",
+        "created_by": user.get("name", ""),
+        "created_at": iso(now_utc()),
+    }
+    res = await db.stocktakes.insert_one(doc)
+    return serialize(await db.stocktakes.find_one({"_id": res.inserted_id}))
+
+
+@api.put("/stocktakes/{sid}")
+async def update_stocktake(sid: str, req: StocktakeUpdateReq, user: dict = Depends(require_roles("manager"))):
+    """Вносит фактически подсчитанное количество по позициям — доступно, пока переучёт не проведён."""
+    rid = user["restaurant_id"]
+    doc = await db.stocktakes.find_one({"_id": parse_oid(sid), "restaurant_id": rid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Переучёт не найден")
+    if doc.get("status") == "posted":
+        raise HTTPException(status_code=400, detail="Переучёт уже проведён — правка недоступна")
+    counted_by_id = {c.inventory_id: c.counted_amount for c in req.items}
+    items = doc["items"]
+    for it in items:
+        if it["inventory_id"] in counted_by_id:
+            counted = counted_by_id[it["inventory_id"]]
+            it["counted_amount"] = counted
+            it["diff"] = round(counted - it["system_amount"], 4)
+    await db.stocktakes.update_one({"_id": doc["_id"]}, {"$set": {"items": items}})
+    return serialize(await db.stocktakes.find_one({"_id": doc["_id"]}))
+
+
+@api.post("/stocktakes/{sid}/post")
+async def post_stocktake(sid: str, user: dict = Depends(require_roles("manager"))):
+    """Проводит переучёт: остаток каждой позиции подгоняется под фактически
+    подсчитанное количество (недостача — списывается, перевес — приходуется).
+    Позиции без внесённого counted_amount пропускаются (считаются нетронутыми)."""
+    rid = user["restaurant_id"]
+    doc = await db.stocktakes.find_one({"_id": parse_oid(sid), "restaurant_id": rid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Переучёт не найден")
+    if doc.get("status") == "posted":
+        raise HTTPException(status_code=400, detail="Переучёт уже проведён")
+    warehouse_id = doc["warehouse_id"]
+    for it in doc["items"]:
+        if it.get("counted_amount") is None:
+            continue
+        diff = round(it["counted_amount"] - it["system_amount"], 4)
+        if diff != 0:
+            await adjust_stock(rid, it["inventory_id"], warehouse_id, diff)
+    await db.stocktakes.update_one({"_id": doc["_id"]}, {"$set": {
+        "status": "posted", "posted_by": user.get("name", ""), "posted_at": iso(now_utc())}})
+    return serialize(await db.stocktakes.find_one({"_id": doc["_id"]}))
+
+
+@api.delete("/stocktakes/{sid}")
+async def delete_stocktake(sid: str, user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    doc = await db.stocktakes.find_one({"_id": parse_oid(sid), "restaurant_id": rid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Переучёт не найден")
+    if doc.get("status") == "posted":
+        raise HTTPException(status_code=400, detail="Переучёт проведён — удаление недоступно")
+    await db.stocktakes.delete_one({"_id": doc["_id"]})
+    return {"ok": True}
+
+
+@api.get("/reports/stocktakes")
+async def report_stocktakes(start: Optional[str] = None, end: Optional[str] = None,
+                            user: dict = Depends(require_roles("manager"))):
+    """Сводка по проведённым переучётам: недостача/перевес/разница по каждому — как у Caffesta."""
+    rid = user["restaurant_id"]
+    docs = await db.stocktakes.find({"restaurant_id": rid, "status": "posted"}).sort("posted_at", -1).to_list(2000)
+    if start:
+        docs = [d for d in docs if (d.get("posted_at") or "")[:10] >= start]
+    if end:
+        docs = [d for d in docs if (d.get("posted_at") or "")[:10] <= end]
+    rows = []
+    for d in docs:
+        shortage = round(sum(-it["diff"] for it in d["items"] if it.get("diff") is not None and it["diff"] < 0), 4)
+        surplus = round(sum(it["diff"] for it in d["items"] if it.get("diff") is not None and it["diff"] > 0), 4)
+        rows.append({
+            "id": str(d["_id"]), "warehouse_id": d["warehouse_id"], "responsible": d.get("responsible"),
+            "posted_at": d.get("posted_at"), "shortage": shortage, "surplus": surplus,
+            "diff_items": sum(1 for it in d["items"] if it.get("diff")),
+        })
+    return {"rows": rows}
+
+
+# ---------------------------------------------------------------------------
+# ПЕРЕОЦЕНКА — меняет себестоимость позиции без изменения количества
+# ---------------------------------------------------------------------------
+@api.get("/revaluations")
+async def list_revaluations(user: dict = Depends(require_roles("manager"))):
+    return await list_docs("revaluations", sort=[("created_at", -1)], rid=user["restaurant_id"])
+
+
+@api.post("/revaluations")
+async def create_revaluation(req: RevalueReq, user: dict = Depends(require_roles("manager"))):
+    """Одношаговая операция (без черновика — правится один параметр, откатить
+    легко новой переоценкой): сразу меняет inventory.cost и пересчитывает
+    себестоимость авто-блюд, использующих этот ингредиент."""
+    rid = user["restaurant_id"]
+    inv = await db.inventory.find_one({"_id": parse_oid(req.inventory_id), "restaurant_id": rid})
+    if not inv:
+        raise HTTPException(status_code=404, detail="Позиция склада не найдена")
+    old_cost = inv.get("cost", 0)
+    balance = inv.get("balance", 0)
+    doc = {
+        "restaurant_id": rid,
+        "inventory_id": req.inventory_id,
+        "name": inv["name"],
+        "old_cost": old_cost,
+        "new_cost": req.new_cost,
+        "balance_at_time": balance,
+        "value_before": round(balance * old_cost, 2),
+        "value_after": round(balance * req.new_cost, 2),
+        "reason": req.reason,
+        "created_by": user.get("name", ""),
+        "created_at": iso(now_utc()),
+    }
+    res = await db.revaluations.insert_one(doc)
+    await db.inventory.update_one({"_id": inv["_id"]}, {"$set": {"cost": req.new_cost}})
+    await recompute_products_for_ingredients(rid, {req.inventory_id})
+    return serialize(await db.revaluations.find_one({"_id": res.inserted_id}))
+
+
+# ---------------------------------------------------------------------------
 # REPORTS / DASHBOARD
 # ---------------------------------------------------------------------------
 @api.get("/reports/dashboard")
 async def dashboard(user: dict = Depends(require_roles("manager"))):
     today = now_utc().date().isoformat()
     closed = await db.orders.find({"status": "closed", "restaurant_id": user["restaurant_id"]}).to_list(10000)
-    today_orders = [o for o in closed if (o.get("closed_at") or "")[:10] == today]
+    today_orders = [o for o in closed if cash_day_of(o) == today]
     revenue_today = round(sum(o.get("total", 0) for o in today_orders), 2)
     orders_today = len(today_orders)
     avg_check = round(revenue_today / orders_today, 2) if orders_today else 0
@@ -2213,7 +3055,7 @@ async def dashboard(user: dict = Depends(require_roles("manager"))):
     days = []
     for i in range(6, -1, -1):
         d = (now_utc().date() - timedelta(days=i)).isoformat()
-        rev = round(sum(o.get("total", 0) for o in closed if (o.get("closed_at") or "")[:10] == d), 2)
+        rev = round(sum(o.get("total", 0) for o in closed if cash_day_of(o) == d), 2)
         days.append({"date": d, "revenue": rev})
 
     # top products (all time)
@@ -2243,13 +3085,46 @@ async def dashboard(user: dict = Depends(require_roles("manager"))):
 @api.get("/reports/sales")
 async def sales_report(start: Optional[str] = None, end: Optional[str] = None,
                        group_by: Optional[str] = None,
+                       waiter_id: Optional[str] = None,
+                       product_id: Optional[str] = None,
+                       category_id: Optional[str] = None,
                        user: dict = Depends(require_roles("manager"))):
     rid = user["restaurant_id"]
     closed = await db.orders.find({"status": "closed", "restaurant_id": rid}).to_list(10000)
     if start:
-        closed = [o for o in closed if (o.get("closed_at") or "")[:10] >= start]
+        closed = [o for o in closed if cash_day_of(o) >= start]
     if end:
-        closed = [o for o in closed if (o.get("closed_at") or "")[:10] <= end]
+        closed = [o for o in closed if cash_day_of(o) <= end]
+
+    # Фильтр по официанту — сужает набор заказов целиком (waiter_id принадлежит заказу).
+    if waiter_id:
+        closed = [o for o in closed if o.get("waiter_id") == waiter_id]
+
+    # Фильтр по блюду/техкарте и/или категории — сужает состав каждого заказа до
+    # подходящих позиций и пересчитывает total заказа по ним же, чтобы вся
+    # существующая агрегация ниже (total/cash/card/by_product/by_cashier)
+    # отработала уже на «урезанных» заказах без дублирования логики.
+    if product_id or category_id:
+        cat_by_product = {}
+        if category_id:
+            prods = await db.products.find({"restaurant_id": rid}).to_list(5000)
+            cat_by_product = {str(p["_id"]): p.get("category_id") for p in prods}
+
+        def item_matches(it):
+            if product_id and it.get("product_id") != product_id:
+                return False
+            if category_id and cat_by_product.get(it.get("product_id")) != category_id:
+                return False
+            return True
+
+        narrowed = []
+        for o in closed:
+            matched_items = [it for it in o.get("items", []) if item_matches(it)]
+            if not matched_items:
+                continue
+            o2 = {**o, "items": matched_items, "total": round(sum(it.get("total", it["price"] * it["count"]) for it in matched_items), 2)}
+            narrowed.append(o2)
+        closed = narrowed
 
     if group_by == "client":
         clients = {str(c["_id"]): c for c in await db.clients.find({"restaurant_id": rid}).to_list(5000)}
@@ -2320,14 +3195,58 @@ async def corrections_report(start: Optional[str] = None, end: Optional[str] = N
     return out
 
 
+@api.get("/reports/risky-receipts")
+async def report_risky_receipts(start: Optional[str] = None, end: Optional[str] = None,
+                                user: dict = Depends(require_roles("manager"))):
+    """«Чеки с риском» (по образцу Poster — доступно только менеджеру/владельцу,
+    не кассиру). Помечает закрытый чек, если: пречек печатали 2+ раз; скидку
+    поставили ПОСЛЕ печати пречека; позицию сторнировали ПОСЛЕ печати пречека
+    (полное удаление — у нас уже требует PIN, здесь просто сводится для обзора)."""
+    rid = user["restaurant_id"]
+    closed = await _closed_in_range(start, end, rid)
+    order_ids = [str(o["_id"]) for o in closed]
+    corrections = await db.order_corrections.find({"restaurant_id": rid, "order_id": {"$in": order_ids}}).to_list(5000)
+    corrections_by_order = {}
+    for c in corrections:
+        corrections_by_order.setdefault(c["order_id"], []).append(c)
+
+    rows = []
+    for o in closed:
+        oid = str(o["_id"])
+        reasons = []
+        if (o.get("precheck_print_count") or 0) >= 2:
+            reasons.append("Повторно распечатали пречек")
+        if o.get("risk_discount_after_precheck"):
+            reasons.append("Скидка после печати пречека")
+        first_print = o.get("precheck_first_printed_at")
+        after_print_corrections = [c for c in corrections_by_order.get(oid, [])
+                                   if first_print and (c.get("created_at") or "") >= first_print
+                                   and c.get("item_name") != "(скидка после печати пречека)"]
+        if after_print_corrections:
+            reasons.append("Удалили позицию после печати пречека")
+        if not reasons:
+            continue
+        rows.append({
+            "order_id": oid, "table_id": o.get("table_id"), "total": o.get("total"),
+            "closed_at": o.get("closed_at"), "cashier_name": o.get("cashier_name"),
+            "precheck_print_count": o.get("precheck_print_count", 0),
+            "reasons": reasons,
+            "corrections": [{"reason": c.get("reason"), "staff_name": c.get("staff_name"),
+                            "created_at": c.get("created_at"), "item_name": c.get("item_name")}
+                           for c in corrections_by_order.get(oid, [])],
+        })
+    rows.sort(key=lambda r: r.get("closed_at") or "", reverse=True)
+    return {"rows": rows, "count": len(rows)}
+
+
 @api.get("/reports/analytics")
 async def analytics_report(start: Optional[str] = None, end: Optional[str] = None,
                            user: dict = Depends(require_roles("manager"))):
     closed = await db.orders.find({"status": "closed", "restaurant_id": user["restaurant_id"]}).to_list(20000)
     if start:
-        closed = [o for o in closed if (o.get("closed_at") or "")[:10] >= start]
+        closed = [o for o in closed if cash_day_of(o) >= start]
     if end:
-        closed = [o for o in closed if (o.get("closed_at") or "")[:10] <= end]
+        closed = [o for o in closed if cash_day_of(o) <= end]
     prods = await db.products.find({"restaurant_id": user["restaurant_id"]}).to_list(3000)
     cost_by_id = {str(p["_id"]): p.get("cost", 0) for p in prods}
     cost_by_name = {p["name"]: p.get("cost", 0) for p in prods}
@@ -2371,9 +3290,9 @@ async def analytics_report(start: Optional[str] = None, end: Optional[str] = Non
 async def _closed_in_range(start, end, rid):
     closed = await db.orders.find({"status": "closed", "restaurant_id": rid}).to_list(20000)
     if start:
-        closed = [o for o in closed if (o.get("closed_at") or "")[:10] >= start]
+        closed = [o for o in closed if cash_day_of(o) >= start]
     if end:
-        closed = [o for o in closed if (o.get("closed_at") or "")[:10] <= end]
+        closed = [o for o in closed if cash_day_of(o) <= end]
     return closed
 
 
@@ -2419,6 +3338,134 @@ async def report_by_workshop(start: Optional[str] = None, end: Optional[str] = N
     for r in rows:
         r["revenue"] = round(r["revenue"], 2)
     return {"rows": rows, "total": round(sum(r["revenue"] for r in rows), 2)}
+
+
+PAYMENT_METHOD_LABELS = {"cash": "Наличные", "card": "Карта", "debt": "В долг"}
+
+
+@api.get("/reports/summary")
+async def report_summary(start: Optional[str] = None, end: Optional[str] = None,
+                         user: dict = Depends(require_roles("manager"))):
+    """«Итоги» — свод Способ оплаты × Цех/отдел: сумма, скидка, сумма платежа,
+    себестоимость (аналог Caffesta: там ещё «Точка продаж», но у нас одна точка продаж на заведение).
+    Скидка/сумма платежа распределяются на цех пропорционально доле позиций в чеке."""
+    rid = user["restaurant_id"]
+    closed = await _closed_in_range(start, end, rid)
+    ws = await db.workshops.find({"restaurant_id": rid}).to_list(1000)
+    ws_name = {str(w["_id"]): w["name"] for w in ws}
+    prods = await db.products.find({"restaurant_id": rid}).to_list(5000)
+    cost_by_id = {str(p["_id"]): p.get("cost", 0) for p in prods}
+
+    methods = await db.payment_methods.find({"restaurant_id": rid}).to_list(100)
+    method_label = {m["code"]: m["name"] for m in methods if m.get("code")}
+
+    agg = {}
+    for o in closed:
+        subtotal = o.get("subtotal") or sum(it.get("total", it["price"] * it["count"]) for it in o.get("items", [])) or 1
+        discount = o.get("discount", 0)
+        pm = o.get("payment_method") or "cash"
+        for it in o.get("items", []):
+            wid = it.get("workshop_id")
+            key = (pm, wid or "none")
+            row = agg.setdefault(key, {
+                "payment_method": pm,
+                "payment_label": method_label.get(pm) or PAYMENT_METHOD_LABELS.get(pm, pm),
+                "workshop": ws_name.get(wid, "Без цеха"),
+                "amount": 0.0, "discount": 0.0, "payment_amount": 0.0, "cost": 0.0,
+            })
+            item_total = it.get("total", it["price"] * it["count"])
+            share = item_total / subtotal if subtotal else 0
+            item_discount = discount * share
+            row["amount"] += item_total
+            row["discount"] += item_discount
+            row["payment_amount"] += item_total - item_discount
+            cost = cost_by_id.get(it.get("product_id"), 0)
+            row["cost"] += (cost or 0) * it["count"]
+
+    rows = sorted(agg.values(), key=lambda x: (x["payment_label"], -x["amount"]))
+    for r in rows:
+        for k in ("amount", "discount", "payment_amount", "cost"):
+            r[k] = round(r[k], 2)
+    totals = {
+        "amount": round(sum(r["amount"] for r in rows), 2),
+        "discount": round(sum(r["discount"] for r in rows), 2),
+        "payment_amount": round(sum(r["payment_amount"] for r in rows), 2),
+        "cost": round(sum(r["cost"] for r in rows), 2),
+    }
+    return {"rows": rows, "totals": totals}
+
+
+@api.get("/reports/pnl")
+async def report_pnl(start: Optional[str] = None, end: Optional[str] = None,
+                     user: dict = Depends(require_roles("manager"))):
+    """P&L: выручка и себестоимость — как в «Итоги» (тот же расчёт, без разбивки по способу оплаты/цеху),
+    минус ручные расходы по категориям, плюс прочие ручные доходы."""
+    rid = user["restaurant_id"]
+    closed = await _closed_in_range(start, end, rid)
+    prods = await db.products.find({"restaurant_id": rid}).to_list(5000)
+    cost_by_id = {str(p["_id"]): p.get("cost", 0) for p in prods}
+    revenue = 0.0
+    cogs = 0.0
+    for o in closed:
+        subtotal = o.get("subtotal") or sum(it.get("total", it["price"] * it["count"]) for it in o.get("items", [])) or 1
+        discount = o.get("discount", 0)
+        for it in o.get("items", []):
+            item_total = it.get("total", it["price"] * it["count"])
+            share = item_total / subtotal if subtotal else 0
+            revenue += item_total - discount * share
+            cogs += cost_by_id.get(it.get("product_id"), 0) * it["count"]
+    revenue = round(revenue, 2)
+    cogs = round(cogs, 2)
+    gross_profit = round(revenue - cogs, 2)
+
+    txns = [serialize(t) for t in await db.finance_transactions.find({"restaurant_id": rid, "type": {"$in": ["income", "expense"]}}).to_list(20000)]
+    if start:
+        txns = [t for t in txns if t["date"] >= start]
+    if end:
+        txns = [t for t in txns if t["date"] <= end]
+
+    def by_category(kind):
+        rows_by_cat = {}
+        for t in txns:
+            if t["type"] != kind:
+                continue
+            key = t.get("category_name") or "Без категории"
+            rows_by_cat[key] = rows_by_cat.get(key, 0) + t["amount"]
+        return sorted([{"category": k, "amount": round(v, 2)} for k, v in rows_by_cat.items()], key=lambda r: -r["amount"])
+
+    expense_rows = by_category("expense")
+    other_income_rows = by_category("income")
+    total_expenses = round(sum(r["amount"] for r in expense_rows), 2)
+    total_other_income = round(sum(r["amount"] for r in other_income_rows), 2)
+    net_profit = round(gross_profit + total_other_income - total_expenses, 2)
+
+    return {
+        "revenue": revenue, "cogs": cogs, "gross_profit": gross_profit,
+        "other_income": other_income_rows, "total_other_income": total_other_income,
+        "expenses": expense_rows, "total_expenses": total_expenses,
+        "net_profit": net_profit,
+    }
+
+
+@api.get("/reports/cashflow")
+async def report_cashflow(start: Optional[str] = None, end: Optional[str] = None,
+                          user: dict = Depends(require_roles("manager"))):
+    rid = user["restaurant_id"]
+    accounts = await list_docs("accounts", sort=[("name", 1)], rid=rid)
+    txns = [serialize(t) for t in await db.finance_transactions.find({"restaurant_id": rid}).sort("date", -1).to_list(20000)]
+    if start:
+        txns = [t for t in txns if t["date"] >= start]
+    if end:
+        txns = [t for t in txns if t["date"] <= end]
+    by_account = []
+    for a in accounts:
+        in_sum = sum(t["amount"] for t in txns if t["type"] == "income" and t["account_id"] == a["id"]) \
+            + sum(t["amount"] for t in txns if t["type"] == "transfer" and t.get("to_account_id") == a["id"])
+        out_sum = sum(t["amount"] for t in txns if t["type"] == "expense" and t["account_id"] == a["id"]) \
+            + sum(t["amount"] for t in txns if t["type"] == "transfer" and t["account_id"] == a["id"])
+        by_account.append({"account_id": a["id"], "account": a["name"], "kind": a["kind"], "balance": a["balance"],
+                           "in": round(in_sum, 2), "out": round(out_sum, 2), "net": round(in_sum - out_sum, 2)})
+    return {"accounts": by_account, "transactions": txns}
 
 
 @api.get("/reports/abc")
@@ -2585,6 +3632,106 @@ async def report_loyalty(start: Optional[str] = None, end: Optional[str] = None,
     outstanding = sum(c.get("bonus_balance", 0) or 0 for c in clients)
     return {"total_accrued": round(accrued, 2), "total_redeemed": round(redeemed, 2),
             "outstanding_balance": round(outstanding, 2)}
+
+
+@api.get("/reports/commissions")
+async def report_commissions(start: Optional[str] = None, end: Optional[str] = None,
+                             staff_id: Optional[str] = None,
+                             user: dict = Depends(require_roles("manager"))):
+    """Мотивация: % от продаж (по образцу Poster — Доступ → Должности → Зарплата).
+    Ставка задаётся по категориям (запись с category_id=None — ставка по умолчанию
+    для всех остальных категорий), а не единым процентом на всё/выбранное. Два режима:
+    - personal — считается по заказам, которые сотрудник ОТКРЫЛ (waiter_id, как у
+      Poster — не тот, кто закрыл/оплатил; waiter_id фиксируется при создании
+      заказа и дальше нигде не меняется);
+    - shift — общий "пул" смены делится поровну между всеми сотрудниками в режиме
+      shift, у которых в этой смене есть хотя бы один открытый заказ (для баров/
+      кухонь, где продажу сложно приписать одному конкретному человеку).
+    База — сумма ПОСЛЕ скидки: скидка заказа распределяется на позиции
+    пропорционально их доле в чеке, а не берётся полная цена позиции."""
+    rid = user["restaurant_id"]
+    closed = await _closed_in_range(start, end, rid)
+    q = {"restaurant_id": rid, "role": {"$in": ["waiter", "admin"]}}
+    if staff_id:
+        q["_id"] = parse_oid(staff_id)
+    staff = await db.users.find(q).to_list(500)
+    prods = await db.products.find({"restaurant_id": rid}).to_list(5000)
+    cat_by_product = {str(p["_id"]): p.get("category_id") for p in prods}
+    cats = await db.categories.find({"restaurant_id": rid}).to_list(1000)
+    cat_name = {str(c["_id"]): c["name"] for c in cats}
+
+    def rate_for(rates_map, cat_id):
+        return rates_map.get(cat_id, rates_map.get(None, 0))
+
+    def item_net(order, it):
+        subtotal = order.get("subtotal") or sum(x.get("total", x["price"] * x["count"]) for x in order.get("items", [])) or 1
+        discount = order.get("discount", 0)
+        item_total = it.get("total", it["price"] * it["count"])
+        item_discount = discount * (item_total / subtotal if subtotal else 0)
+        return item_total - item_discount
+
+    result = {str(s["_id"]): {
+        "staff_id": str(s["_id"]), "staff_name": s.get("name", ""),
+        "commission_mode": s.get("commission_mode", "personal"),
+        "rates": s.get("commission_rates", []) or [],
+        "sales_base": 0.0, "commission_amount": 0.0, "orders_count": 0,
+    } for s in staff}
+
+    personal_staff = [s for s in staff if s.get("commission_mode", "personal") == "personal" and s.get("commission_rates")]
+    shift_staff = [s for s in staff if s.get("commission_mode") == "shift" and s.get("commission_rates")]
+
+    orders_by_waiter = {}
+    for o in closed:
+        orders_by_waiter.setdefault(o.get("waiter_id"), []).append(o)
+    for s in personal_staff:
+        sid = str(s["_id"])
+        rates_map = {r["category_id"]: r["percent"] for r in s.get("commission_rates", [])}
+        orders = orders_by_waiter.get(sid, [])
+        row = result[sid]
+        row["orders_count"] = len(orders)
+        for o in orders:
+            for it in o.get("items", []):
+                pct = rate_for(rates_map, cat_by_product.get(it.get("product_id")))
+                if pct <= 0:
+                    continue
+                net = item_net(o, it)
+                row["sales_base"] += net
+                row["commission_amount"] += net * pct / 100
+
+    if shift_staff:
+        orders_by_shift = {}
+        for o in closed:
+            orders_by_shift.setdefault(o.get("shift_id"), []).append(o)
+        for sh_id, orders in orders_by_shift.items():
+            waiter_ids_in_shift = {o.get("waiter_id") for o in orders}
+            participants = [s for s in shift_staff if str(s["_id"]) in waiter_ids_in_shift]
+            if not participants:
+                continue
+            n = len(participants)
+            shift_gross = sum(item_net(o, it) for o in orders for it in o.get("items", []))
+            for s in participants:
+                sid = str(s["_id"])
+                rates_map = {r["category_id"]: r["percent"] for r in s.get("commission_rates", [])}
+                row = result[sid]
+                row["orders_count"] += sum(1 for o in orders if o.get("waiter_id") == sid)
+                pool = sum(
+                    item_net(o, it) * rate_for(rates_map, cat_by_product.get(it.get("product_id"))) / 100
+                    for o in orders for it in o.get("items", [])
+                )
+                row["commission_amount"] += pool / n
+                row["sales_base"] += shift_gross / n
+
+    rows = [r for r in result.values() if r["rates"]]
+    for r in rows:
+        r["sales_base"] = round(r["sales_base"], 2)
+        r["commission_amount"] = round(r["commission_amount"], 2)
+        parts = []
+        for rt in r["rates"]:
+            label = cat_name.get(rt["category_id"], "?") if rt["category_id"] else "по умолчанию"
+            parts.append(f"{label} {rt['percent']}%")
+        r["rates_label"] = ", ".join(parts)
+    rows.sort(key=lambda r: r["commission_amount"], reverse=True)
+    return {"rows": rows, "total_commission": round(sum(r["commission_amount"] for r in rows), 2)}
 
 
 
@@ -2808,7 +3955,22 @@ async def get_settings(user: dict = Depends(get_current_user)):
         "max_bonus_payment_percent": doc.get("max_bonus_payment_percent", 50),
         "service_charge_percent": doc.get("service_charge_percent", 0),
         "service_charge_default_enabled": doc.get("service_charge_default_enabled", False),
+        "geofence_enabled": bool(doc.get("geofence_enabled")),
+        "geofence_lat": doc.get("geofence_lat"),
+        "geofence_lng": doc.get("geofence_lng"),
+        "geofence_radius_m": doc.get("geofence_radius_m", 150),
     }
+
+
+@api.put("/settings/geofence")
+async def set_geofence(req: GeofenceSettingsReq, user: dict = Depends(require_roles("manager"))):
+    await db.settings.update_one({"key": "venue"}, {"$set": {
+        "key": "venue", "geofence_enabled": req.enabled,
+        "geofence_lat": req.lat, "geofence_lng": req.lng, "geofence_radius_m": req.radius_m,
+    }}, upsert=True)
+    doc = await db.settings.find_one({"key": "venue"})
+    return {"geofence_enabled": bool(doc.get("geofence_enabled")), "geofence_lat": doc.get("geofence_lat"),
+            "geofence_lng": doc.get("geofence_lng"), "geofence_radius_m": doc.get("geofence_radius_m", 150)}
 
 
 @api.put("/settings/receipt")
@@ -2980,6 +4142,15 @@ async def request_bill(oid: str, user: dict = Depends(get_current_user)):
     if not printer:
         raise HTTPException(status_code=400, detail="Не настроен принтер пречека (станция precheck)")
     job = await make_job(o, printer, "precheck", o["items"], o.get("subtotal"))
+    now = iso(now_utc())
+    await db.orders.update_one({"_id": o["_id"]}, {
+        "$inc": {"precheck_print_count": 1},
+        "$set": {"precheck_last_printed_at": now},
+        "$setOnInsert": {},
+    })
+    if not o.get("precheck_first_printed_at"):
+        await db.orders.update_one({"_id": o["_id"], "precheck_first_printed_at": {"$exists": False}},
+                                   {"$set": {"precheck_first_printed_at": now}})
     return {"success": True, "job": job}
 
 
@@ -3199,6 +4370,52 @@ async def seed():
         await db.users.update_many({"role": "manager", "name": "Администратор"}, {"$set": {"name": "Менеджер"}})
         await db.settings.update_one({"key": "role_names_v1"},
                                      {"$set": {"key": "role_names_v1", "done_at": iso(now_utc())}}, upsert=True)
+
+    # --- Накладные: старые накладные уже фактически провели остаток при создании,
+    # помечаем их проведёнными задним числом, чтобы не потерять историю ---
+    if not await db.settings.find_one({"key": "invoice_posted_migration_v1"}):
+        await db.invoices.update_many(
+            {"status": {"$exists": False}},
+            {"$set": {"status": "posted", "posted_at": None}})
+        await db.settings.update_one({"key": "invoice_posted_migration_v1"},
+                                     {"$set": {"key": "invoice_posted_migration_v1", "done_at": iso(now_utc())}}, upsert=True)
+
+    # --- Кассовый день: одноразовый бэкфилл для смен/заказов без cash_day ---
+    if not await db.settings.find_one({"key": "cash_day_migration_v1"}):
+        async for sh in db.shifts.find({"cash_day": {"$exists": False}}):
+            day = (sh.get("opened_at") or "")[:10] or now_utc().date().isoformat()
+            await db.shifts.update_one({"_id": sh["_id"]}, {"$set": {"cash_day": day}})
+        async for o in db.orders.find({"cash_day": {"$exists": False}}):
+            day = None
+            if o.get("shift_id"):
+                sh = await db.shifts.find_one({"_id": parse_oid(o["shift_id"])})
+                if sh:
+                    day = sh.get("cash_day") or (sh.get("opened_at") or "")[:10]
+            if not day:
+                day = (o.get("closed_at") or o.get("created_at") or "")[:10]
+            await db.orders.update_one({"_id": o["_id"]}, {"$set": {"cash_day": day}})
+        await db.settings.update_one({"key": "cash_day_migration_v1"},
+                                     {"$set": {"key": "cash_day_migration_v1", "done_at": iso(now_utc())}}, upsert=True)
+
+    # --- Мотивация: перевод старой формы (commission_percent/scope/category_ids)
+    # на новую (commission_mode/commission_rates по категориям) ---
+    if not await db.settings.find_one({"key": "commission_rates_migration_v1"}):
+        async for u in db.users.find({"commission_percent": {"$exists": True}}):
+            pct = u.get("commission_percent", 0) or 0
+            scope = u.get("commission_scope", "all")
+            cat_ids = u.get("commission_category_ids", []) or []
+            rates = []
+            if pct > 0:
+                if scope == "categories" and cat_ids:
+                    rates = [{"category_id": cid, "percent": pct} for cid in cat_ids]
+                else:
+                    rates = [{"category_id": None, "percent": pct}]
+            await db.users.update_one({"_id": u["_id"]}, {
+                "$set": {"commission_mode": "personal", "commission_rates": rates},
+                "$unset": {"commission_percent": "", "commission_scope": "", "commission_category_ids": ""},
+            })
+        await db.settings.update_one({"key": "commission_rates_migration_v1"},
+                                     {"$set": {"key": "commission_rates_migration_v1", "done_at": iso(now_utc())}}, upsert=True)
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@resto.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")

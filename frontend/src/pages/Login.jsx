@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import api, { apiErr } from "@/lib/api";
 import { toast } from "sonner";
-import { Delete, ChefHat, ShieldCheck, Users } from "lucide-react";
+import { Delete, ChefHat, ArrowLeft } from "lucide-react";
 
 const BG = "https://images.pexels.com/photos/13343442/pexels-photo-13343442.jpeg";
 
@@ -16,10 +16,20 @@ export default function Login() {
   const [password, setPassword] = useState("admin123");
   const [loading, setLoading] = useState(false);
 
+  const getCoords = () => new Promise((resolve) => {
+    if (!navigator.geolocation) { resolve({}); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => resolve({}),
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+    );
+  });
+
   const doPin = async (value) => {
     setLoading(true);
     try {
-      const { data } = await api.post("/auth/pin-login", { pin: value });
+      const coords = await getCoords();
+      const { data } = await api.post("/auth/pin-login", { pin: value, ...coords });
       login(data.token, data.user);
       toast.success(`Добро пожаловать, ${data.user.name}`);
       nav(data.user.role === "manager" ? "/admin" : "/pos");
@@ -33,12 +43,9 @@ export default function Login() {
 
   const press = (d) => {
     if (loading) return;
-    const next = (pin + d).slice(0, 6);
+    const next = (pin + d).slice(0, 4);
     setPin(next);
-    if (next.length >= 4) {
-      // auto-submit at 4; allow up to 6 by delaying
-      if (next.length === 4) setTimeout(() => doPin(next), 150);
-    }
+    if (next.length === 4) setTimeout(() => doPin(next), 150);
   };
 
   const doAdmin = async (e) => {
@@ -57,7 +64,7 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen flex">
+    <div className="min-h-screen flex bg-[#0A0A0A] text-white">
       {/* Left brand panel */}
       <div className="hidden lg:flex w-1/2 relative">
         <img src={BG} alt="kitchen" className="absolute inset-0 w-full h-full object-cover opacity-40" />
@@ -84,38 +91,16 @@ export default function Login() {
       {/* Right auth panel */}
       <div className="flex-1 flex items-center justify-center p-6">
         <div className="w-full max-w-sm fade-up">
-          <div className="flex gap-2 mb-8 p-1 bg-[#121212] border border-[#27272A] rounded-lg">
-            <button
-              data-testid="mode-staff-btn"
-              onClick={() => setMode("staff")}
-              className={`flex-1 py-3 rounded-md text-sm font-semibold flex items-center justify-center gap-2 transition-colors ${
-                mode === "staff" ? "bg-[#FF5A00] text-white" : "text-[#A1A1AA] hover:text-white"
-              }`}
-            >
-              <Users size={16} /> Официант / Администратор
-            </button>
-            <button
-              data-testid="mode-admin-btn"
-              onClick={() => setMode("admin")}
-              className={`flex-1 py-3 rounded-md text-sm font-semibold flex items-center justify-center gap-2 transition-colors ${
-                mode === "admin" ? "bg-[#FF5A00] text-white" : "text-[#A1A1AA] hover:text-white"
-              }`}
-            >
-              <ShieldCheck size={16} /> Менеджер
-            </button>
-          </div>
-
           {mode === "staff" ? (
             <div>
-              <h2 className="font-head text-2xl font-bold mb-1">Введите PIN-код</h2>
-              <p className="text-[#A1A1AA] text-sm mb-6">Демо: официант 1111, администратор 2222</p>
+              <h2 className="font-head text-2xl font-bold mb-6">Введите PIN-код</h2>
               <div className="flex justify-center gap-3 mb-8" data-testid="pin-dots">
-                {[0, 1, 2, 3, 4, 5].map((i) => (
+                {[0, 1, 2, 3].map((i) => (
                   <div
                     key={i}
                     className={`w-3.5 h-3.5 rounded-full transition-colors ${
                       i < pin.length ? "bg-[#FF5A00]" : "bg-[#27272A]"
-                    } ${i >= 4 && pin.length < 5 ? "opacity-30" : ""}`}
+                    }`}
                   />
                 ))}
               </div>
@@ -132,7 +117,7 @@ export default function Login() {
                 ))}
                 <button
                   data-testid="pin-submit"
-                  onClick={() => pin.length >= 4 && doPin(pin)}
+                  onClick={() => pin.length === 4 && doPin(pin)}
                   className="bg-[#1A1A1A] border border-[#27272A] rounded-lg text-sm font-medium h-16 flex items-center justify-center hover:bg-[#27272A] active:scale-95 transition-transform text-[#00E676]"
                 >
                   OK
@@ -152,11 +137,25 @@ export default function Login() {
                   <Delete size={22} />
                 </button>
               </div>
+              <button
+                data-testid="mode-admin-btn"
+                onClick={() => setMode("admin")}
+                className="w-full text-center text-sm text-[#A1A1AA] hover:text-white mt-6 transition-colors"
+              >
+                Вход для менеджера
+              </button>
             </div>
           ) : (
             <form onSubmit={doAdmin}>
-              <h2 className="font-head text-2xl font-bold mb-1">Вход менеджера</h2>
-              <p className="text-[#A1A1AA] text-sm mb-6">Демо: admin@resto.com / admin123</p>
+              <button
+                type="button"
+                data-testid="mode-staff-btn"
+                onClick={() => setMode("staff")}
+                className="flex items-center gap-1.5 text-sm text-[#A1A1AA] hover:text-white mb-5 transition-colors"
+              >
+                <ArrowLeft size={15} /> Назад
+              </button>
+              <h2 className="font-head text-2xl font-bold mb-6">Вход менеджера</h2>
               <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA]">Email</label>
               <input
                 data-testid="admin-email"

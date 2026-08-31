@@ -3,15 +3,66 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Design tokens — dark is the default (no attribute needed), light opts in via [data-theme="light"] on <html>. */
 :root {
-  --bg: #0A0A0A;
-  --surface: #121212;
-  --surface2: #1A1A1A;
-  --border: #27272A;
-  --orange: #FF5A00;
-  --cyan: #00E5FF;
-  --green: #00E676;
-  --red: #FF3B30;
+  --bg: #0B0B0C;
+  --surface: #141415;
+  --surface-2: #1C1C1F;
+  --surface-hover: #202023;
+  --border: #232326;
+  --border-strong: #333338;
+  --ink: #F2F2F0;
+  --ink-dim: #9C9CA3;
+  --ink-faint: #5C5C63;
+  --accent: #FF5A00;
+  --accent-hover: #E04F00;
+  --accent-soft: #FF5A0022;
+  --accent-soft-border: #FF5A0044;
+  --success: #00E676;
+  --success-soft: #00E67622;
+  --danger: #FF3B30;
+  --danger-soft: #FF3B3022;
+  --info: #00E5FF;
+  --info-soft: #00E5FF22;
+  --purple: #A855F7;
+  --purple-soft: #A855F722;
+  --warning: #FACC15;
+  --warning-soft: #FACC1522;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.5);
+
+  /* legacy aliases kept for any stray references */
+  --surface2: var(--surface-2);
+  --orange: var(--accent);
+  --cyan: var(--info);
+  --green: var(--success);
+  --red: var(--danger);
+}
+
+:root[data-theme="light"] {
+  --bg: #F7F6F3;
+  --surface: #FFFFFF;
+  --surface-2: #F1F0EB;
+  --surface-hover: #EAE8E2;
+  --border: #E5E2DB;
+  --border-strong: #D2CEC3;
+  --ink: #1C1B19;
+  --ink-dim: #6B6862;
+  --ink-faint: #A19D91;
+  --accent: #FF5A00;
+  --accent-hover: #E04F00;
+  --accent-soft: #FF5A0014;
+  --accent-soft-border: #FF5A0033;
+  --success: #16A34A;
+  --success-soft: #16A34A14;
+  --danger: #DC2626;
+  --danger-soft: #DC262614;
+  --info: #0891B2;
+  --info-soft: #0891B214;
+  --purple: #9333EA;
+  --purple-soft: #9333EA14;
+  --warning: #B45309;
+  --warning-soft: #B4530914;
+  --shadow: 0 1px 2px rgba(30,30,25,.04), 0 8px 24px -12px rgba(30,30,25,.10);
 }
 
 * { box-sizing: border-box; }
@@ -20,9 +71,10 @@ html, body, #root {
   margin: 0;
   height: 100%;
   background: var(--bg);
-  color: #fff;
+  color: var(--ink);
   font-family: 'IBM Plex Sans', sans-serif;
   -webkit-font-smoothing: antialiased;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 h1, h2, h3, h4, .font-head {
@@ -32,8 +84,8 @@ h1, h2, h3, h4, .font-head {
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #27272A; border-radius: 8px; }
-::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
 
 .tabnum { font-variant-numeric: tabular-nums; }
 

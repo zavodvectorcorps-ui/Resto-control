@@ -28,7 +28,8 @@ export function AuthProvider({ children }) {
     setUser(u);
   };
 
-  const logout = () => {
+  const logout = async () => {
+    try { await api.post("/time-entries/clock-out"); } catch {}
     localStorage.removeItem("resto_token");
     setUser(false);
   };

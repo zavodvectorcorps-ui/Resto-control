@@ -1,0 +1,18 @@
+{$DOMAIN} {
+	encode gzip
+
+	# API — на backend внутри docker-сети (без этого правила Caddy решит,
+	# что /api/... — это несуществующий файл, и отдаст index.html)
+	handle /api/* {
+		reverse_proxy backend:8001
+	}
+
+	# Всё остальное — статический фронт; неизвестные пути (например
+	# /admin/menu при обновлении страницы) отдаём в index.html, чтобы
+	# роутинг React Router отработал на клиенте
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+}

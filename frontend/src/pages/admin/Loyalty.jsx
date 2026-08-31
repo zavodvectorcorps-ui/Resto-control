@@ -68,29 +68,29 @@ export default function Loyalty() {
       <div className="flex gap-2 mb-6">
         {[["groups", "Группы"], ["promos", "Акции"], ["settings", "Настройки"]].map(([k, l]) => (
           <button key={k} onClick={() => setTab(k)} data-testid={`loyalty-tab-${k}`}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold ${tab === k ? "bg-[#FF5A00] text-white" : "bg-[#121212] border border-[#27272A] text-[#A1A1AA]"}`}>{l}</button>
+            className={`px-4 py-2 rounded-lg text-sm font-semibold ${tab === k ? "bg-[var(--accent)] text-white" : "bg-[var(--surface)] border border-[var(--border)] text-[var(--ink-dim)]"}`}>{l}</button>
         ))}
       </div>
 
       {tab === "groups" && (
         <div>
           <div className="flex justify-end mb-4"><Btn onClick={() => { setGForm({ type: "bonus" }); setGModal(true); }} data-testid="add-lgroup-btn"><Plus size={16} className="inline mr-1" /> Группа</Btn></div>
-          <div className="bg-[#121212] border border-[#27272A] rounded-xl overflow-hidden">
+          <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl overflow-hidden">
             <table className="w-full text-sm">
-              <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]"><th className="text-left p-4">Название</th><th className="text-left p-4">Тип</th><th className="text-right p-4">%</th><th className="p-4"></th></tr></thead>
+              <thead><tr className="text-[var(--ink-dim)] text-xs uppercase border-b border-[var(--border)]"><th className="text-left p-4">Название</th><th className="text-left p-4">Тип</th><th className="text-right p-4">%</th><th className="p-4"></th></tr></thead>
               <tbody>
                 {groups.map((g) => (
-                  <tr key={g.id} className="border-b border-[#1A1A1A]" data-testid={`lgroup-row-${g.id}`}>
+                  <tr key={g.id} className="border-b border-[var(--surface-2)]" data-testid={`lgroup-row-${g.id}`}>
                     <td className="p-4 font-medium">{g.name}</td>
-                    <td className="p-4 text-[#A1A1AA]">{g.type === "bonus" ? "Бонусы (кэшбэк)" : "Скидка"}</td>
-                    <td className="p-4 text-right tabnum text-[#FF5A00]">{g.value_percent}%</td>
+                    <td className="p-4 text-[var(--ink-dim)]">{g.type === "bonus" ? "Бонусы (кэшбэк)" : "Скидка"}</td>
+                    <td className="p-4 text-right tabnum text-[var(--accent)]">{g.value_percent}%</td>
                     <td className="p-4"><div className="flex gap-2 justify-end">
-                      <button onClick={() => { setGForm(g); setGModal(true); }} className="text-[#A1A1AA] hover:text-white" data-testid={`edit-lgroup-${g.id}`}><Pencil size={16} /></button>
-                      <button onClick={() => delGroup(g.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-lgroup-${g.id}`}><Trash2 size={16} /></button>
+                      <button onClick={() => { setGForm(g); setGModal(true); }} className="text-[var(--ink-dim)] hover:text-[var(--ink)]" data-testid={`edit-lgroup-${g.id}`}><Pencil size={16} /></button>
+                      <button onClick={() => delGroup(g.id)} className="text-[var(--ink-dim)] hover:text-[var(--danger)]" data-testid={`del-lgroup-${g.id}`}><Trash2 size={16} /></button>
                     </div></td>
                   </tr>
                 ))}
-                {groups.length === 0 && <tr><td colSpan="4" className="p-6 text-center text-[#52525B]">Групп нет</td></tr>}
+                {groups.length === 0 && <tr><td colSpan="4" className="p-6 text-center text-[var(--ink-faint)]">Групп нет</td></tr>}
               </tbody>
             </table>
           </div>
@@ -100,23 +100,23 @@ export default function Loyalty() {
       {tab === "promos" && (
         <div>
           <div className="flex justify-end mb-4"><Btn onClick={() => { setPForm({ result_type: "discount_percent", auto_apply: true, active: true, weekdays: [] }); setPModal(true); }} data-testid="add-promo-btn"><Plus size={16} className="inline mr-1" /> Акция</Btn></div>
-          <div className="bg-[#121212] border border-[#27272A] rounded-xl overflow-hidden">
+          <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl overflow-hidden">
             <table className="w-full text-sm">
-              <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]"><th className="text-left p-4">Акция</th><th className="text-left p-4">Окно</th><th className="text-left p-4">Результат</th><th className="text-center p-4">Статус</th><th className="p-4"></th></tr></thead>
+              <thead><tr className="text-[var(--ink-dim)] text-xs uppercase border-b border-[var(--border)]"><th className="text-left p-4">Акция</th><th className="text-left p-4">Окно</th><th className="text-left p-4">Результат</th><th className="text-center p-4">Статус</th><th className="p-4"></th></tr></thead>
               <tbody>
                 {promos.map((p) => (
-                  <tr key={p.id} className="border-b border-[#1A1A1A]" data-testid={`promo-adm-${p.id}`}>
+                  <tr key={p.id} className="border-b border-[var(--surface-2)]" data-testid={`promo-adm-${p.id}`}>
                     <td className="p-4 font-medium">{p.name}</td>
-                    <td className="p-4 text-[#A1A1AA] text-xs">{p.weekdays?.length ? p.weekdays.map((d) => WEEKDAYS[d]).join(",") : "все дни"} {p.time_from || "00:00"}–{p.time_to || "24:00"}</td>
-                    <td className="p-4 text-[#A1A1AA]">{p.result_type === "discount_percent" ? `−${p.result_value}%` : p.result_type}</td>
-                    <td className="p-4 text-center"><span className={`text-xs px-2 py-0.5 rounded-full ${p.active ? "bg-[#00E676]/20 text-[#00E676]" : "bg-[#27272A] text-[#52525B]"}`}>{p.active ? "активна" : "выкл"}</span></td>
+                    <td className="p-4 text-[var(--ink-dim)] text-xs">{p.weekdays?.length ? p.weekdays.map((d) => WEEKDAYS[d]).join(",") : "все дни"} {p.time_from || "00:00"}–{p.time_to || "24:00"}</td>
+                    <td className="p-4 text-[var(--ink-dim)]">{p.result_type === "discount_percent" ? `−${p.result_value}%` : p.result_type}</td>
+                    <td className="p-4 text-center"><span className={`text-xs px-2 py-0.5 rounded-full ${p.active ? "bg-[var(--success-soft)] text-[var(--success)]" : "bg-[var(--border)] text-[var(--ink-faint)]"}`}>{p.active ? "активна" : "выкл"}</span></td>
                     <td className="p-4"><div className="flex gap-2 justify-end">
-                      <button onClick={() => { setPForm(p); setPModal(true); }} className="text-[#A1A1AA] hover:text-white" data-testid={`edit-promo-${p.id}`}><Pencil size={16} /></button>
-                      <button onClick={() => delPromo(p.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-promo-${p.id}`}><Trash2 size={16} /></button>
+                      <button onClick={() => { setPForm(p); setPModal(true); }} className="text-[var(--ink-dim)] hover:text-[var(--ink)]" data-testid={`edit-promo-${p.id}`}><Pencil size={16} /></button>
+                      <button onClick={() => delPromo(p.id)} className="text-[var(--ink-dim)] hover:text-[var(--danger)]" data-testid={`del-promo-${p.id}`}><Trash2 size={16} /></button>
                     </div></td>
                   </tr>
                 ))}
-                {promos.length === 0 && <tr><td colSpan="5" className="p-6 text-center text-[#52525B]">Акций нет</td></tr>}
+                {promos.length === 0 && <tr><td colSpan="5" className="p-6 text-center text-[var(--ink-faint)]">Акций нет</td></tr>}
               </tbody>
             </table>
           </div>
@@ -125,15 +125,15 @@ export default function Loyalty() {
 
       {tab === "settings" && (
         <div className="max-w-md space-y-6">
-          <div className="bg-[#121212] border border-[#27272A] rounded-xl p-6 space-y-4">
+          <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl p-6 space-y-4">
             <Field label="Макс. оплата бонусами (% от чека)" type="number" value={maxBonus} onChange={(e) => setMaxBonus(e.target.value)} data-testid="max-bonus-input" />
             <Btn onClick={saveMaxBonus} data-testid="save-max-bonus-btn">Сохранить лимит</Btn>
           </div>
-          <div className="bg-[#121212] border border-[#27272A] rounded-xl p-6 space-y-4">
+          <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl p-6 space-y-4">
             <h3 className="font-head font-bold">Сервисный сбор</h3>
             <Field label="Процент, %" type="number" value={scPct} onChange={(e) => setScPct(e.target.value)} data-testid="sc-percent-input" />
-            <label className="flex items-center gap-2 text-sm text-[#A1A1AA] cursor-pointer">
-              <input type="checkbox" checked={scDefault} onChange={(e) => setScDefault(e.target.checked)} className="accent-[#FF5A00] w-4 h-4" data-testid="sc-default-check" />
+            <label className="flex items-center gap-2 text-sm text-[var(--ink-dim)] cursor-pointer">
+              <input type="checkbox" checked={scDefault} onChange={(e) => setScDefault(e.target.checked)} className="accent-[var(--accent)] w-4 h-4" data-testid="sc-default-check" />
               Включать по умолчанию на новых заказах
             </label>
             <Btn onClick={saveServiceCharge} data-testid="save-sc-btn">Сохранить сервисный сбор</Btn>
@@ -155,11 +155,11 @@ export default function Loyalty() {
         <div className="space-y-4">
           <Field label="Название" value={pForm.name || ""} onChange={(e) => setPForm({ ...pForm, name: e.target.value })} data-testid="promo-name-input" />
           <div>
-            <label className="text-xs uppercase tracking-[0.15em] text-[#A1A1AA] block mb-2">Дни недели (пусто = все)</label>
+            <label className="text-xs uppercase tracking-[0.15em] text-[var(--ink-dim)] block mb-2">Дни недели (пусто = все)</label>
             <div className="flex gap-1.5">
               {WEEKDAYS.map((w, d) => (
                 <button key={d} type="button" onClick={() => toggleWd(d)} data-testid={`promo-wd-${d}`}
-                  className={`w-9 h-9 rounded-lg text-xs font-semibold ${(pForm.weekdays || []).includes(d) ? "bg-[#FF5A00] text-white" : "bg-[#0A0A0A] border border-[#27272A] text-[#A1A1AA]"}`}>{w}</button>
+                  className={`w-9 h-9 rounded-lg text-xs font-semibold ${(pForm.weekdays || []).includes(d) ? "bg-[var(--accent)] text-white" : "bg-[var(--bg)] border border-[var(--border)] text-[var(--ink-dim)]"}`}>{w}</button>
               ))}
             </div>
           </div>
@@ -171,8 +171,8 @@ export default function Loyalty() {
             options={[{ value: "discount_percent", label: "Скидка %" }, { value: "free_item", label: "Бесплатное блюдо" }, { value: "bonus_item", label: "Бонусное блюдо" }]} data-testid="promo-resulttype-select" />
           <Field label={pForm.result_type === "discount_percent" ? "Скидка, %" : "Значение"} type="number" value={pForm.result_value ?? 0} onChange={(e) => setPForm({ ...pForm, result_value: e.target.value })} data-testid="promo-resultvalue-input" />
           <div className="flex gap-4">
-            <label className="flex items-center gap-2 text-sm text-[#A1A1AA]"><input type="checkbox" checked={pForm.auto_apply !== false} onChange={(e) => setPForm({ ...pForm, auto_apply: e.target.checked })} className="accent-[#FF5A00] w-4 h-4" data-testid="promo-autoapply-check" /> Авто-применение</label>
-            <label className="flex items-center gap-2 text-sm text-[#A1A1AA]"><input type="checkbox" checked={pForm.active !== false} onChange={(e) => setPForm({ ...pForm, active: e.target.checked })} className="accent-[#FF5A00] w-4 h-4" data-testid="promo-active-check" /> Активна</label>
+            <label className="flex items-center gap-2 text-sm text-[var(--ink-dim)]"><input type="checkbox" checked={pForm.auto_apply !== false} onChange={(e) => setPForm({ ...pForm, auto_apply: e.target.checked })} className="accent-[var(--accent)] w-4 h-4" data-testid="promo-autoapply-check" /> Авто-применение</label>
+            <label className="flex items-center gap-2 text-sm text-[var(--ink-dim)]"><input type="checkbox" checked={pForm.active !== false} onChange={(e) => setPForm({ ...pForm, active: e.target.checked })} className="accent-[var(--accent)] w-4 h-4" data-testid="promo-active-check" /> Активна</label>
           </div>
           <Btn onClick={savePromo} className="w-full" data-testid="save-promo-btn">Сохранить</Btn>
         </div>

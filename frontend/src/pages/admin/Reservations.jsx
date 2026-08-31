@@ -6,7 +6,7 @@ import { Plus, Trash2, CalendarClock } from "lucide-react";
 import { PageHead, Btn, Field, SelectField, Modal } from "@/components/admin/ui";
 
 const today = () => new Date().toISOString().slice(0, 10);
-const STATUS = { pending: ["Ожидает", "#FFB020"], confirmed: ["Подтверждена", "#00E5FF"], seated: ["Гость за столом", "#00E676"], cancelled: ["Отменена", "#FF3B30"], done: ["Завершена", "#52525B"] };
+const STATUS = { pending: ["Ожидает", "var(--warning)"], confirmed: ["Подтверждена", "var(--info)"], seated: ["Гость за столом", "var(--success)"], cancelled: ["Отменена", "var(--danger)"], done: ["Завершена", "var(--ink-faint)"] };
 
 export default function Reservations() {
   const qc = useQueryClient();
@@ -32,30 +32,30 @@ export default function Reservations() {
         action={<Btn onClick={() => { setForm({ date, guests_count: 1 }); setModal(true); }} data-testid="add-reservation-btn"><Plus size={16} className="inline mr-1" /> Бронь</Btn>} />
       <div className="mb-6">
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} data-testid="reservation-date-filter"
-          className="bg-[#0A0A0A] border border-[#27272A] rounded-lg px-4 py-2.5 outline-none focus:border-[#FF5A00]" />
+          className="bg-[var(--bg)] border border-[var(--border)] rounded-lg px-4 py-2.5 outline-none focus:border-[var(--accent)]" />
       </div>
-      <div className="bg-[#121212] border border-[#27272A] rounded-xl overflow-hidden">
+      <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl overflow-hidden">
         <table className="w-full text-sm">
-          <thead><tr className="text-[#A1A1AA] text-xs uppercase border-b border-[#27272A]">
+          <thead><tr className="text-[var(--ink-dim)] text-xs uppercase border-b border-[var(--border)]">
             <th className="text-left p-4">Время</th><th className="text-left p-4">Гость</th><th className="text-left p-4">Стол</th><th className="text-right p-4">Гостей</th><th className="text-right p-4">Депозит</th><th className="text-left p-4">Статус</th><th className="p-4"></th></tr></thead>
           <tbody>
             {list.map((r) => (
-              <tr key={r.id} className="border-b border-[#1A1A1A]" data-testid={`reservation-row-${r.id}`}>
-                <td className="p-4 tabnum"><CalendarClock size={13} className="inline mr-1 text-[#FF5A00]" />{r.time_from}{r.time_to ? `–${r.time_to}` : ""}</td>
-                <td className="p-4 font-medium">{r.guest_name}<div className="text-xs text-[#52525B]">{r.guest_phone}</div></td>
-                <td className="p-4 text-[#A1A1AA]">{tables.find((t) => t.id === r.table_id)?.name || r.hall || "—"}</td>
+              <tr key={r.id} className="border-b border-[var(--surface-2)]" data-testid={`reservation-row-${r.id}`}>
+                <td className="p-4 tabnum"><CalendarClock size={13} className="inline mr-1 text-[var(--accent)]" />{r.time_from}{r.time_to ? `–${r.time_to}` : ""}</td>
+                <td className="p-4 font-medium">{r.guest_name}<div className="text-xs text-[var(--ink-faint)]">{r.guest_phone}</div></td>
+                <td className="p-4 text-[var(--ink-dim)]">{tables.find((t) => t.id === r.table_id)?.name || r.hall || "—"}</td>
                 <td className="p-4 text-right tabnum">{r.guests_count}</td>
-                <td className="p-4 text-right tabnum text-[#00E676]">{Number(r.deposit_amount || 0).toFixed(2)} ₽</td>
+                <td className="p-4 text-right tabnum text-[var(--success)]">{Number(r.deposit_amount || 0).toFixed(2)} ₽</td>
                 <td className="p-4">
                   <select value={r.status} onChange={(e) => setStatus(r.id, e.target.value)} data-testid={`reservation-status-${r.id}`}
-                    className="bg-[#0A0A0A] border border-[#27272A] rounded-lg px-2 py-1 text-xs outline-none" style={{ color: STATUS[r.status]?.[1] }}>
+                    className="bg-[var(--bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-xs outline-none" style={{ color: STATUS[r.status]?.[1] }}>
                     {Object.entries(STATUS).map(([k, v]) => <option key={k} value={k}>{v[0]}</option>)}
                   </select>
                 </td>
-                <td className="p-4 text-right"><button onClick={() => del(r.id)} className="text-[#A1A1AA] hover:text-[#FF3B30]" data-testid={`del-reservation-${r.id}`}><Trash2 size={16} /></button></td>
+                <td className="p-4 text-right"><button onClick={() => del(r.id)} className="text-[var(--ink-dim)] hover:text-[var(--danger)]" data-testid={`del-reservation-${r.id}`}><Trash2 size={16} /></button></td>
               </tr>
             ))}
-            {list.length === 0 && <tr><td colSpan="7" className="p-6 text-center text-[#52525B]">Броней на эту дату нет</td></tr>}
+            {list.length === 0 && <tr><td colSpan="7" className="p-6 text-center text-[var(--ink-faint)]">Броней на эту дату нет</td></tr>}
           </tbody>
         </table>
       </div>
