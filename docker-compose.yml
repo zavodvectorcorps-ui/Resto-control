@@ -1,5 +1,5 @@
 services:
-  mongo:
+  restocontrol-mongo:
     image: mongo:7
     restart: unless-stopped
     environment:
@@ -17,7 +17,7 @@ services:
     env_file:
       - ./backend/.env.production
     depends_on:
-      - mongo
+      - restocontrol-mongo
     networks:
       - restocontrol-net
       - menu_rest2-shared
