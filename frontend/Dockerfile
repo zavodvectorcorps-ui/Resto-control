@@ -2,7 +2,7 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --legacy-peer-deps
 COPY . .
 # Пусто = фронт ходит на /api того же домена (общий nginx на VPS проксирует
 # /api на backend, а этот контейнер отдаёт только статику) — не завязываемся
