@@ -7,30 +7,38 @@ services:
       - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
     volumes:
       - mongo_data:/data/db
+    networks:
+      - restocontrol-net
 
   backend:
     build: ./backend
+    container_name: restocontrol-backend
     restart: unless-stopped
     env_file:
       - ./backend/.env.production
     depends_on:
       - mongo
+    networks:
+      - restocontrol-net
+      - menu_rest2-shared
 
   frontend:
     build: ./frontend
+    container_name: restocontrol-frontend
     restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      - DOMAIN=${DOMAIN}
-    volumes:
-      - caddy_data:/data
-      - caddy_config:/config
     depends_on:
       - backend
+    networks:
+      - menu_rest2-shared
 
 volumes:
   mongo_data:
-  caddy_data:
-  caddy_config:
+
+networks:
+  restocontrol-net:
+    driver: bridge
+  # Общая сеть VPS — её держит nginx-хаб проекта Menu_rest2 (см. DEPLOY.md),
+  # через неё он видит restocontrol-backend/restocontrol-frontend по имени.
+  menu_rest2-shared:
+    external: true
+    name: menu_rest2_default

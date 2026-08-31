@@ -40,6 +40,11 @@ api = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("resto")
 
+
+@api.get("/health")
+async def health():
+    return {"status": "ok"}
+
 # ---------------------------------------------------------------------------
 # Mongo helpers
 # ---------------------------------------------------------------------------

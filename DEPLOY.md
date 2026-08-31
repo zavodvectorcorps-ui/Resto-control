@@ -1,130 +1,179 @@
-# Деплой RestoControl на свой VPS
+# Деплой RestoControl на VPS (общий хаб Menu_rest2)
 
-Схема: 3 контейнера через `docker compose` — MongoDB, backend (FastAPI) и
-frontend (статическая сборка React, которую раздаёт Caddy — он же
-реверс-прокси `/api/*` на backend и сам получает HTTPS-сертификат
-Let's Encrypt, без ручной возни с certbot).
+На этом VPS уже живут несколько проектов (`Menu_rest2`/rest-menu.by,
+`alfinance`, `wm-finance`) за одним общим nginx-контейнером
+(`menu_rest2-nginx-1`), который держит порты 80/443 и раздаёт SSL для всех
+доменов через общий certbot. RestoControl подключается тем же способом —
+собственного nginx/Caddy и своих портов 80/443 не заводим.
 
-MongoDB и backend не публикуются наружу — только Caddy слушает 80/443.
+Домен: **restocontrol.by**
 
-## 0. Перед первым деплоем — сохранить текущую работу
+## Схема
 
-В репозитории сейчас много несохранённых изменений (не закоммичены и не
-запушены в GitHub). Это первое, что нужно сделать — иначе деплоить
-физически нечего будет клонировать на сервер:
+```
+Интернет → menu_rest2-nginx-1 (80/443, общий) → restocontrol-backend:8001
+                                                → restocontrol-frontend:80
+```
+
+`restocontrol-backend`/`restocontrol-frontend` — контейнеры RestoControl,
+подключённые к общей docker-сети `menu_rest2_default` (как и
+`wmfinance-backend`/`wmfinance-frontend` для wm-finance.pl — тот же
+проверенный паттерн). Mongo RestoControl — в отдельной сети, наружу и
+другим проектам не виден.
+
+## 1. Забрать код на сервер
 
 ```bash
-git add -A
-git commit -m "..."
-git push origin main
-```
-
-## 1. Что нужно на руках
-
-- [ ] Домен, который вы контролируете (DNS)
-- [ ] SSH-доступ к VPS (IP, пользователь, ключ или пароль)
-- [ ] VPS: Ubuntu 22.04/24.04, от 2 ГБ RAM (Mongo + backend + frontend в
-      контейнерах — для двух заведений с их нагрузкой этого с запасом хватит)
-
-## 2. DNS
-
-У регистратора домена добавьте A-запись, указывающую на IP VPS:
-
-```
-A   your-domain.example   →   ВАШ_IP_VPS
-```
-
-Подождите, пока распространится (обычно 5–30 минут, можно проверить
-`dig your-domain.example`).
-
-## 3. Установить Docker на VPS
-
-```bash
-ssh root@ВАШ_IP_VPS
-
-curl -fsSL https://get.docker.com | sh
-systemctl enable --now docker
-```
-
-## 4. Забрать код на сервер
-
-```bash
+ssh vps-knyazev
+cd /root
 git clone https://github.com/zavodvectorcorps-ui/Resto-control.git
 cd Resto-control
 ```
 
-## 5. Заполнить конфиги
+## 2. Заполнить конфиги
 
 ```bash
 cp .env.production.example .env
 cp backend/.env.production.example backend/.env.production
 ```
 
-Откройте оба файла и замените все `CHANGE_ME_...`:
+Сгенерировать и вписать:
+- `.env`: `MONGO_ROOT_PASSWORD` — `openssl rand -hex 24`
+- `backend/.env.production`: `JWT_SECRET` — `openssl rand -hex 32`;
+  пароль в `MONGO_URL` = тот же `MONGO_ROOT_PASSWORD`; `ADMIN_EMAIL`/
+  `ADMIN_PASSWORD` — учётка первого менеджера (`CORS_ORIGINS` и остальное
+  уже проставлено на `restocontrol.by`)
 
-- `.env` (корень): `DOMAIN` = ваш реальный домен, `MONGO_ROOT_PASSWORD` —
-  сгенерировать через `openssl rand -hex 24`
-- `backend/.env.production`: `JWT_SECRET` (`openssl rand -hex 32`),
-  пароль в `MONGO_URL` (тот же, что `MONGO_ROOT_PASSWORD` выше),
-  `CORS_ORIGINS=https://ваш-домен`, `ADMIN_EMAIL`/`ADMIN_PASSWORD` —
-  учётка первого менеджера, под которым войдёте после запуска
-
-## 6. Запуск
+## 3. Поднять контейнеры
 
 ```bash
 docker compose up -d --build
+docker compose ps
 ```
 
-Первая сборка займёт несколько минут (собирается фронт, ставятся
-Python-зависимости). Caddy сам обратится в Let's Encrypt за сертификатом —
-на это нужно, чтобы DNS уже указывал на сервер (см. шаг 2).
-
-Проверить статус:
+На этом этапе сайт ещё не доступен снаружи — только внутри общей сети.
+Проверка изнутри:
 
 ```bash
-docker compose ps
-docker compose logs -f --tail=50
+docker run --rm --network menu_rest2_default curlimages/curl \
+  curl -s http://restocontrol-backend:8001/api/health
 ```
 
-Открыть `https://ваш-домен` — должен открыться экран входа RestoControl
-с рабочим замком в адресной строке.
+## 4. DNS
 
-## 7. Первый вход и проверка
+У регистратора `restocontrol.by` добавить A-запись на IP этого VPS
+(`212.192.22.12`) для `restocontrol.by` и `www.restocontrol.by`.
+Подождать распространения (`dig +short restocontrol.by`).
 
-1. Зайти как менеджер (`ADMIN_EMAIL`/`ADMIN_PASSWORD` из шага 5)
-2. Дальше пойдёт восстановление данных из бэкапа/повторный перенос из
-   Caffesta — на новой базе будет пусто, это ожидаемо
-3. Пройти полный цикл заказа на одном столе, чтобы убедиться, что всё
-   живое: открытие смены → заказ → печать (или эмулятор) → оплата →
-   закрытие смены
+## 5. Подключить домен к общему nginx + получить сертификат
 
-## 8. Бэкапы
+`Menu_rest2/scripts/add-domain.sh` заточен под upstream-имена `backend`/
+`frontend` (это контейнеры основного rest-menu.by) — для RestoControl
+имена другие (`restocontrol-backend`/`restocontrol-frontend`), поэтому
+шаги те же самые, но руками:
+
+```bash
+cd /root/Menu_rest2
+
+# 1) сертификат
+docker compose run --rm --entrypoint "\
+    certbot certonly --webroot -w /var/www/certbot \
+    --email admin@restocontrol.by --agree-tos --no-eff-email \
+    -d restocontrol.by -d www.restocontrol.by" certbot
+
+# 2) конфиг сайта
+cat > nginx/custom-domains/restocontrol.by.conf <<'EOF'
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name restocontrol.by www.restocontrol.by;
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    ssl_certificate /etc/nginx/ssl/live/restocontrol.by/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/live/restocontrol.by/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    client_max_body_size 20M;
+
+    location /api/ {
+        limit_req zone=api burst=20 nodelay;
+        set $backend_upstream "restocontrol-backend:8001";
+        proxy_pass http://$backend_upstream;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 86400;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+    }
+
+    location / {
+        set $frontend_upstream "restocontrol-frontend:80";
+        proxy_pass http://$frontend_upstream;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+    }
+}
+EOF
+
+# 3) проверить и перезагрузить
+docker run --rm \
+  -v "$(pwd)/nginx/nginx.conf":/etc/nginx/nginx.conf:ro \
+  -v "$(pwd)/nginx/custom-domains":/etc/nginx/custom-domains:ro \
+  -v "$(pwd)/nginx/ssl":/etc/nginx/ssl:ro \
+  nginx:alpine nginx -t -c /etc/nginx/nginx.conf
+
+docker compose restart nginx
+```
+
+Если `nginx -t` ругается — конфиг НЕ применится сам (контейнер продолжит
+работать со старым конфигом), можно спокойно чинить и повторять команду.
+
+## 6. Проверка
+
+Открыть `https://restocontrol.by` — экран входа RestoControl, рабочий
+замок в адресной строке. Остальные сайты (`rest-menu.by`, `wm-finance.pl`
+и т.д.) должны продолжать отвечать как раньше — не пересекались.
+
+Дальше — вход менеджером, полный цикл заказа (смена → стол → заказ →
+оплата → закрытие смены), как в исходном плане.
+
+## Бэкапы
 
 ```bash
 crontab -e
 ```
 
-Добавить строку (бэкап каждую ночь в 03:00, хранится 14 копий):
-
 ```
 0 3 * * * /root/Resto-control/scripts/mongo-backup.sh >> /var/log/resto-backup.log 2>&1
 ```
 
-## 9. Обновление после изменений в коде
+## Обновление после изменений в коде
 
 ```bash
-cd Resto-control
+cd /root/Resto-control
 git pull
 docker compose up -d --build
 ```
 
-Данные в MongoDB при этом не трогаются (том `mongo_data` персистентный).
+Данные в Mongo не трогаются (том `mongo_data` персистентный). Домен и
+сертификат трогать не нужно — они настраиваются один раз.
 
 ## Диагностика
 
-- Caddy не выдаёт сертификат → проверьте, что DNS уже указывает на этот
-  IP (`dig +short ваш-домен`) и что 80/443 не заняты и не закрыты
-  файрволом (`ufw allow 80,443/tcp`)
-- Backend не стартует → `docker compose logs backend`, чаще всего —
-  опечатка в `backend/.env.production`
-- 502 на `/api/*` → backend ещё не поднялся или упал, смотрите его логи
+- `docker compose logs backend` / `docker compose logs frontend` — логи
+  RestoControl
+- `docker exec menu_rest2-nginx-1 nginx -t` — валиден ли общий конфиг
+  прямо сейчас
+- 502 на `restocontrol.by` → RestoControl ещё не поднялся или упал;
+  проверить `docker compose ps` в `/root/Resto-control`
+- Другие сайты (rest-menu.by и т.д.) отвалились после наших правок →
+  `cd /root/Menu_rest2 && docker compose restart nginx` откатит на
+  последний валидный конфиг только если мы не перезаписали рабочий файл;
+  наш файл лежит отдельно (`custom-domains/restocontrol.by.conf`) и на
+  остальные не влияет — можно просто удалить его и перезапустить nginx
