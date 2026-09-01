@@ -1288,10 +1288,10 @@ export default function Pos() {
 function PosTopBar({ user, shift, onLogout, onCloseShift, onCash, floating, pendingSyncCount }) {
   return (
     <div className={`h-14 sm:h-16 border-b border-[#27272A] bg-[#0A0A0A] flex items-center justify-between px-3 sm:px-6 gap-2 ${floating ? "w-full absolute top-0" : ""}`}>
-      <div className="flex items-center gap-2 sm:gap-3 min-w-0 overflow-hidden">
+      <div className="flex items-center gap-2 sm:gap-3 min-w-0 overflow-hidden flex-1">
         <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-[#FF5A00] flex items-center justify-center shrink-0"><ChefHat size={18} /></div>
         <span className="hidden sm:inline font-head text-lg font-extrabold whitespace-nowrap shrink-0">RestoControl</span>
-        <span className="text-xs sm:text-sm text-[#A1A1AA] truncate max-w-[110px] sm:max-w-[220px]" data-testid="pos-user-name">
+        <span className="text-xs sm:text-sm text-[#A1A1AA] truncate min-w-0" data-testid="pos-user-name">
           {user.name}
         </span>
       </div>
