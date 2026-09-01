@@ -6,6 +6,20 @@ export const DEFAULT_CIRCLE = { width: 68, height: 68 };
 const PAD = 40;
 const MIN_SIZE = 40;
 
+// Сортировка столов для списков (мобильный POS): реальные столы по
+// возрастанию номера, служебные слоты (доставка, стафф и т.п.) — в конце
+// по алфавиту. На карте зала порядок не важен — там позиция задаёт x/y.
+export function sortTablesForList(tables) {
+  return [...tables].sort((a, b) => {
+    if (!!a.is_service !== !!b.is_service) return a.is_service ? 1 : -1;
+    const an = parseFloat(a.name), bn = parseFloat(b.name);
+    const aNum = Number.isFinite(an), bNum = Number.isFinite(bn);
+    if (aNum && bNum && an !== bn) return an - bn;
+    if (aNum !== bNum) return aNum ? -1 : 1;
+    return a.name.localeCompare(b.name, "ru");
+  });
+}
+
 // Общий холст карты зала. mode="edit" — перетаскивание/ресайз/удаление (админка).
 // mode="select" — только клик по столу (POS официанта).
 const PALETTE = {
@@ -25,8 +39,20 @@ const PALETTE = {
   },
 };
 
-export function FloorPlan({ hall, tables, mode = "select", variant = "admin", fit = "width", isMine, onMove, onResize, onDelete, onSelect, renderExtra }) {
+// Класс состояния стола (свободен/мой/чужой/служебный) — общий для карты
+// зала и мобильного списка столов, чтобы цвета не расходились.
+export function tableStateClasses(t, { variant = "admin", mode = "select", isMine } = {}) {
   const palette = PALETTE[variant];
+  const occupied = !!t.open_order;
+  const mine = mode === "select" && occupied && (isMine ? isMine(t) : true);
+  const others = mode === "select" && occupied && !mine;
+  if (t.is_service) return occupied ? palette.serviceOccupied : palette.serviceFree;
+  if (others) return palette.others;
+  if (mine || (mode === "edit" && occupied)) return palette.mine;
+  return palette.free;
+}
+
+export function FloorPlan({ hall, tables, mode = "select", variant = "admin", fit = "width", isMine, onMove, onResize, onDelete, onSelect, renderExtra }) {
   const dark = variant === "pos";
   const ref = useRef(null);
   const [drag, setDrag] = useState(null); // { id, kind: 'move'|'resize', x,y,w,h }
@@ -105,19 +131,7 @@ export function FloorPlan({ hall, tables, mode = "select", variant = "admin", fi
         const y = isDrag ? drag.y : (t.pos_y ?? 40);
         const isCircle = t.shape === "circle";
         const occupied = !!t.open_order;
-        const mine = mode === "select" && occupied && (isMine ? isMine(t) : true);
-        const others = mode === "select" && occupied && !mine;
-
-        let stateClasses;
-        if (t.is_service) {
-          stateClasses = occupied ? palette.serviceOccupied : palette.serviceFree;
-        } else if (others) {
-          stateClasses = palette.others;
-        } else if (mine || (mode === "edit" && occupied)) {
-          stateClasses = palette.mine;
-        } else {
-          stateClasses = palette.free;
-        }
+        const stateClasses = tableStateClasses(t, { variant, mode, isMine });
 
         return (
           <div key={t.id}

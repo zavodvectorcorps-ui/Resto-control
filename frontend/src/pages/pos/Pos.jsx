@@ -9,12 +9,17 @@ import {
   ChefHat, LogOut, Plus, Minus, Trash2, Send, CreditCard, Grid3x3,
   ArrowLeft, Power, Printer, Banknote, X, Utensils, Search,
   Receipt, ArrowRightLeft, Scissors, Check, AlertTriangle, MessageSquare, Wallet,
+  User, Tag,
 } from "lucide-react";
-import { FloorPlan, hallsOf } from "@/components/admin/FloorPlan";
+import { FloorPlan, hallsOf, sortTablesForList, tableStateClasses } from "@/components/admin/FloorPlan";
 import { StatusIndicators } from "@/components/StatusIndicators";
 import { useConnectionStatus } from "@/hooks/useConnectionStatus";
 import { useOfflineQueueFlush } from "@/hooks/useOfflineQueueFlush";
 import { enqueue as enqueueOffline, isNetworkError, isQueued as isQueuedOffline } from "@/lib/offlineQueue";
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuLabel, DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
 
 const money = (n) => `${Number(n || 0).toFixed(2)} ₽`;
 
@@ -665,14 +670,14 @@ export default function Pos() {
       <PosTopBar user={user} shift={shift} onLogout={() => { logout(); nav("/login"); }} onCloseShift={closeShift} onCash={() => { setCashAmt(""); setCashReason(""); setCashMove({ type: "in" }); }} pendingSyncCount={pendingSyncCount} />
 
       {view === "tables" ? (
-        <div className="flex-1 flex flex-col overflow-hidden p-5 pb-4">
-          <div className="flex items-center justify-between mb-4 shrink-0">
-            <h2 className="font-head text-xl font-bold">Выберите стол</h2>
+        <div className="flex-1 flex flex-col overflow-hidden p-3 sm:p-5 pb-4">
+          <div className="flex items-center justify-between mb-3 sm:mb-4 shrink-0 gap-2">
+            <h2 className="font-head text-lg sm:text-xl font-bold">Выберите стол</h2>
             {posHalls.length > 1 && (
-              <div className="flex bg-[#121212] border border-[#27272A] rounded-lg p-1" data-testid="pos-hall-tabs">
+              <div className="flex bg-[#121212] border border-[#27272A] rounded-lg p-1 shrink-0" data-testid="pos-hall-tabs">
                 {posHalls.map((hall) => (
                   <button key={hall} onClick={() => setActiveHall(hall)} data-testid={`pos-hall-tab-${hall}`}
-                    className={`px-5 py-2 rounded-md text-sm font-semibold transition-colors ${
+                    className={`px-3 sm:px-5 py-2 rounded-md text-sm font-semibold transition-colors ${
                       activeHall === hall ? "bg-[#FF5A00] text-white" : "text-[#A1A1AA] hover:text-white"
                     }`}>
                     {hall}
@@ -681,7 +686,40 @@ export default function Pos() {
               </div>
             )}
           </div>
-          <div className="flex-1 min-h-0 flex items-center justify-center">
+
+          {/* Телефон: список столов крупными плитками — карта зала, рассчитанная
+              на широкий экран, на маленьком экране превращается в нечитаемую кашу. */}
+          <div className="flex-1 min-h-0 overflow-y-auto md:hidden">
+            {activeHall && (
+              <div className="grid grid-cols-3 gap-2.5 pb-2" data-testid="pos-table-list">
+                {sortTablesForList(tables.filter((t) => t.hall === activeHall)).map((t) => {
+                  const cls = tableStateClasses(t, { variant: "pos", mode: "select", isMine: (tt) => tt.open_order?.waiter_id === user.id });
+                  return (
+                    <button key={t.id} onClick={() => selectTable(t)} data-testid={`pos-table-list-${t.id}`}
+                      className={`relative flex flex-col items-center justify-center gap-1 rounded-xl border-[1.5px] px-2 py-4 min-h-[76px] active:scale-95 transition-transform ${cls}`}>
+                      {isQueuedOffline(t.id) && (
+                        <div className="absolute top-1.5 right-1.5 text-[#FACC15]" title="Есть несинхронизированные данные">
+                          <Send size={11} />
+                        </div>
+                      )}
+                      {t.is_service && <Tag size={10} className="absolute top-1.5 left-1.5 text-[#71717A]" />}
+                      <div className={`font-head font-bold leading-tight ${t.is_service ? "text-[11px] text-[#A1A1AA]" : "text-lg"}`}>{t.name}</div>
+                      {t.open_orders && t.open_orders.length ? (
+                        <div className="text-xs font-semibold tabnum text-inherit">
+                          {money(t.open_total)}{t.open_orders.length > 1 ? ` · ${t.open_orders.length}сч` : ""}
+                        </div>
+                      ) : !t.is_service ? (
+                        <div className="text-[11px] text-[#52525B]">своб.</div>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Планшет/десктоп: визуальная карта зала как настроил админ. */}
+          <div className="hidden md:flex flex-1 min-h-0 items-center justify-center">
             {activeHall && (
               <FloorPlan hall={activeHall} tables={tables.filter((t) => t.hall === activeHall)} mode="select" variant="pos" fit="height"
                 isMine={(t) => t.open_order?.waiter_id === user.id}
@@ -1250,32 +1288,44 @@ export default function Pos() {
 
 function PosTopBar({ user, shift, onLogout, onCloseShift, onCash, floating, pendingSyncCount }) {
   return (
-    <div className={`h-16 border-b border-[#27272A] bg-[#0A0A0A] flex items-center justify-between px-6 ${floating ? "w-full absolute top-0" : ""}`}>
-      <div className="flex items-center gap-3">
-        <div className="w-9 h-9 rounded-lg bg-[#FF5A00] flex items-center justify-center"><ChefHat size={20} /></div>
-        <span className="font-head text-lg font-extrabold">RestoControl</span>
-        {shift && <span className="ml-3 text-xs px-2 py-1 rounded-md bg-[#00E67611] text-[#00E676] font-semibold">Смена открыта</span>}
+    <div className={`h-14 sm:h-16 border-b border-[#27272A] bg-[#0A0A0A] flex items-center justify-between px-3 sm:px-6 gap-2 ${floating ? "w-full absolute top-0" : ""}`}>
+      <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+        <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-[#FF5A00] flex items-center justify-center shrink-0"><ChefHat size={18} /></div>
+        <span className="hidden sm:inline font-head text-lg font-extrabold whitespace-nowrap">RestoControl</span>
+        {shift && <span className="text-[11px] sm:text-xs px-1.5 sm:px-2 py-1 rounded-md bg-[#00E67611] text-[#00E676] font-semibold whitespace-nowrap">Смена открыта</span>}
       </div>
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-1.5 sm:gap-4 shrink-0">
         {!!pendingSyncCount && (
           <span data-testid="pending-sync-badge" title="Заказы/оплаты, ожидающие отправки на сервер"
             className="text-xs px-2 py-1 rounded-md bg-[#FACC1511] text-[#FACC15] font-semibold flex items-center gap-1.5">
-            <Send size={12} /> В очереди: {pendingSyncCount}
+            <Send size={12} /> <span className="hidden sm:inline">В очереди:</span> {pendingSyncCount}
           </span>
         )}
         <StatusIndicators variant="pos" />
-        <span className="text-sm text-[#A1A1AA]">{user.name}</span>
-        {shift && user.role === "admin" && onCash && (
-          <button onClick={onCash} data-testid="cash-move-btn" className="text-sm text-[#A1A1AA] hover:text-[#FACC15] flex items-center gap-1">
-            <Wallet size={16} /> Касса
-          </button>
-        )}
-        {shift && user.role === "admin" && (
-          <button onClick={onCloseShift} data-testid="close-shift-btn" className="text-sm text-[#A1A1AA] hover:text-[#FF3B30] flex items-center gap-1">
-            <Power size={16} /> Закрыть смену
-          </button>
-        )}
-        <button onClick={onLogout} data-testid="pos-logout-btn" className="text-[#A1A1AA] hover:text-[#FF3B30]"><LogOut size={18} /></button>
+        <DropdownMenu>
+          <DropdownMenuTrigger data-testid="pos-user-menu-btn"
+            className="w-8 h-8 sm:w-auto sm:h-auto shrink-0 rounded-md sm:rounded-lg flex items-center gap-2 sm:px-3 sm:py-1.5 justify-center text-[#A1A1AA] hover:text-white hover:bg-[#1A1A1A] outline-none">
+            <User size={17} />
+            <span className="hidden sm:inline text-sm max-w-[140px] truncate">{user.name}</span>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="bg-[#161616] border-[#27272A] text-white min-w-[220px]">
+            <DropdownMenuLabel className="text-[#71717A] font-normal sm:hidden">{user.name}</DropdownMenuLabel>
+            <DropdownMenuSeparator className="bg-[#27272A] sm:hidden" />
+            {shift && user.role === "admin" && onCash && (
+              <DropdownMenuItem onClick={onCash} data-testid="cash-move-btn" className="gap-2 cursor-pointer focus:bg-[#242424] focus:text-white">
+                <Wallet size={16} /> Касса
+              </DropdownMenuItem>
+            )}
+            {shift && user.role === "admin" && (
+              <DropdownMenuItem onClick={onCloseShift} data-testid="close-shift-btn" className="gap-2 cursor-pointer text-[#FF3B30] focus:bg-[#2A1414] focus:text-[#FF3B30]">
+                <Power size={16} /> Закрыть смену
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem onClick={onLogout} data-testid="pos-logout-btn" className="gap-2 cursor-pointer focus:bg-[#242424] focus:text-white">
+              <LogOut size={16} /> Выйти
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   );
