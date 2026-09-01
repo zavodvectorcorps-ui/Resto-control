@@ -5,6 +5,7 @@ import api, { apiErr } from "@/lib/api";
 import { toast } from "sonner";
 import { Delete, ArrowLeft } from "lucide-react";
 import logo from "@/assets/myata-logo.png";
+import logoPin from "@/assets/myata-logo-pin.png";
 
 const BG = "https://images.pexels.com/photos/13343442/pexels-photo-13343442.jpeg";
 
@@ -91,7 +92,7 @@ export default function Login() {
       <div className="flex-1 flex items-center justify-center p-6">
         <div className="w-full max-w-sm fade-up">
           <div className="lg:hidden flex justify-center mb-6">
-            <img src={logo} alt="Мята" className="w-24 h-24 object-contain" />
+            <img src={logoPin} alt="Мята" className="w-40 h-40 object-contain" />
           </div>
           {mode === "staff" ? (
             <div>
