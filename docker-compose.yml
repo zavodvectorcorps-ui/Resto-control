@@ -10,7 +10,7 @@ services:
     networks:
       - restocontrol-net
 
-  backend:
+  restocontrol-backend:
     build: ./backend
     container_name: restocontrol-backend
     restart: unless-stopped
@@ -22,12 +22,12 @@ services:
       - restocontrol-net
       - menu_rest2-shared
 
-  frontend:
+  restocontrol-frontend:
     build: ./frontend
     container_name: restocontrol-frontend
     restart: unless-stopped
     depends_on:
-      - backend
+      - restocontrol-backend
     networks:
       - menu_rest2-shared
 
@@ -39,6 +39,16 @@ networks:
     driver: bridge
   # Общая сеть VPS — её держит nginx-хаб проекта Menu_rest2 (см. DEPLOY.md),
   # через неё он видит restocontrol-backend/restocontrol-frontend по имени.
+  #
+  # ВАЖНО: имена СЕРВИСОВ (ключи выше, "restocontrol-backend"/"restocontrol-frontend")
+  # обязаны отличаться от "backend"/"frontend" — Docker Compose регистрирует
+  # алиас в docker-сети и по container_name, И по имени сервиса. Если бы сервисы
+  # назывались просто "backend"/"frontend", в общей сети menu_rest2_default
+  # возник бы конфликт алиасов с ЧУЖИМИ контейнерами menu_rest2-backend-1/
+  # menu_rest2-frontend-1 (у них те же имена сервисов в их docker-compose.yml) —
+  # DNS начал бы отдавать случайный из двух контейнеров на каждый запрос,
+  # роняя ЧУЖОЙ живой сайт (rest-menu.by) через раз. Это реально происходило —
+  # не переименовывать обратно.
   menu_rest2-shared:
     external: true
     name: menu_rest2_default
