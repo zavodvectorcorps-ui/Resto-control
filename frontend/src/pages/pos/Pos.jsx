@@ -18,7 +18,6 @@ import { useOfflineQueueFlush } from "@/hooks/useOfflineQueueFlush";
 import { enqueue as enqueueOffline, isNetworkError, isQueued as isQueuedOffline } from "@/lib/offlineQueue";
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
-  DropdownMenuLabel, DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 
 const money = (n) => `${Number(n || 0).toFixed(2)} ₽`;
@@ -1289,28 +1288,32 @@ export default function Pos() {
 function PosTopBar({ user, shift, onLogout, onCloseShift, onCash, floating, pendingSyncCount }) {
   return (
     <div className={`h-14 sm:h-16 border-b border-[#27272A] bg-[#0A0A0A] flex items-center justify-between px-3 sm:px-6 gap-2 ${floating ? "w-full absolute top-0" : ""}`}>
-      <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+      <div className="flex items-center gap-2 sm:gap-3 min-w-0 overflow-hidden">
         <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-[#FF5A00] flex items-center justify-center shrink-0"><ChefHat size={18} /></div>
-        <span className="hidden sm:inline font-head text-lg font-extrabold whitespace-nowrap">RestoControl</span>
-        {shift && <span className="text-[11px] sm:text-xs px-1.5 sm:px-2 py-1 rounded-md bg-[#00E67611] text-[#00E676] font-semibold whitespace-nowrap">Смена открыта</span>}
+        <span className="hidden sm:inline font-head text-lg font-extrabold whitespace-nowrap shrink-0">RestoControl</span>
+        <span className="text-xs sm:text-sm text-[#A1A1AA] truncate max-w-[110px] sm:max-w-[220px]" data-testid="pos-user-name">
+          {user.name}
+        </span>
       </div>
-      <div className="flex items-center gap-1.5 sm:gap-4 shrink-0">
-        {!!pendingSyncCount && (
-          <span data-testid="pending-sync-badge" title="Заказы/оплаты, ожидающие отправки на сервер"
-            className="text-xs px-2 py-1 rounded-md bg-[#FACC1511] text-[#FACC15] font-semibold flex items-center gap-1.5">
-            <Send size={12} /> <span className="hidden sm:inline">В очереди:</span> {pendingSyncCount}
-          </span>
-        )}
-        <StatusIndicators variant="pos" />
+      <div className="flex items-center gap-2 sm:gap-4 shrink-0">
+        <div className="flex flex-col items-end gap-1">
+          {shift && <span className="text-[10px] leading-none px-1.5 py-0.5 rounded bg-[#00E67611] text-[#00E676] font-semibold whitespace-nowrap">Смена открыта</span>}
+          <div className="flex items-center gap-1.5">
+            {!!pendingSyncCount && (
+              <span data-testid="pending-sync-badge" title="Заказы/оплаты, ожидающие отправки на сервер"
+                className="text-[10px] sm:text-xs px-1.5 sm:px-2 py-0.5 sm:py-1 rounded-md bg-[#FACC1511] text-[#FACC15] font-semibold flex items-center gap-1">
+                <Send size={11} /> <span className="hidden sm:inline">В очереди:</span> {pendingSyncCount}
+              </span>
+            )}
+            <StatusIndicators variant="pos" />
+          </div>
+        </div>
         <DropdownMenu>
           <DropdownMenuTrigger data-testid="pos-user-menu-btn"
-            className="w-8 h-8 sm:w-auto sm:h-auto shrink-0 rounded-md sm:rounded-lg flex items-center gap-2 sm:px-3 sm:py-1.5 justify-center text-[#A1A1AA] hover:text-white hover:bg-[#1A1A1A] outline-none">
+            className="w-8 h-8 shrink-0 rounded-md flex items-center justify-center text-[#A1A1AA] hover:text-white hover:bg-[#1A1A1A] outline-none">
             <User size={17} />
-            <span className="hidden sm:inline text-sm max-w-[140px] truncate">{user.name}</span>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="bg-[#161616] border-[#27272A] text-white min-w-[220px]">
-            <DropdownMenuLabel className="text-[#71717A] font-normal sm:hidden">{user.name}</DropdownMenuLabel>
-            <DropdownMenuSeparator className="bg-[#27272A] sm:hidden" />
             {shift && user.role === "admin" && onCash && (
               <DropdownMenuItem onClick={onCash} data-testid="cash-move-btn" className="gap-2 cursor-pointer focus:bg-[#242424] focus:text-white">
                 <Wallet size={16} /> Касса
