@@ -15,7 +15,7 @@ mkdir -p "$BACKUP_DIR"
 cd "$PROJECT_DIR"
 MONGO_PASSWORD="$(grep -oP '(?<=^MONGO_ROOT_PASSWORD=).*' .env)"
 
-docker compose exec -T mongo mongodump \
+docker compose exec -T restocontrol-mongo mongodump \
   --username resto --password "$MONGO_PASSWORD" --authenticationDatabase admin \
   --archive > "$BACKUP_DIR/resto_control_$DATE.archive"
 
