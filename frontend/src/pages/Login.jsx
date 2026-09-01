@@ -3,7 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import api, { apiErr } from "@/lib/api";
 import { toast } from "sonner";
-import { Delete, ChefHat, ArrowLeft } from "lucide-react";
+import { Delete, ArrowLeft } from "lucide-react";
+import logo from "@/assets/myata-logo.png";
 
 const BG = "https://images.pexels.com/photos/13343442/pexels-photo-13343442.jpeg";
 
@@ -71,9 +72,7 @@ export default function Login() {
         <div className="absolute inset-0 bg-gradient-to-tr from-[#0A0A0A] via-[#0A0A0A]/70 to-transparent" />
         <div className="relative z-10 flex flex-col justify-between p-12">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-[#FF5A00] flex items-center justify-center">
-              <ChefHat size={22} />
-            </div>
+            <img src={logo} alt="Мята" className="w-14 h-14 object-contain" />
             <span className="font-head text-2xl font-extrabold">RestoControl</span>
           </div>
           <div>
@@ -91,6 +90,9 @@ export default function Login() {
       {/* Right auth panel */}
       <div className="flex-1 flex items-center justify-center p-6">
         <div className="w-full max-w-sm fade-up">
+          <div className="lg:hidden flex justify-center mb-6">
+            <img src={logo} alt="Мята" className="w-24 h-24 object-contain" />
+          </div>
           {mode === "staff" ? (
             <div>
               <h2 className="font-head text-2xl font-bold mb-6">Введите PIN-код</h2>

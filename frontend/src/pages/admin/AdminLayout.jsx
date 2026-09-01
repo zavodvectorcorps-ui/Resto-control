@@ -6,8 +6,9 @@ import { StatusIndicators } from "@/components/StatusIndicators";
 import api from "@/lib/api";
 import {
   LayoutDashboard, UtensilsCrossed, Factory, Grid3x3, Warehouse,
-  Users, BarChart3, LogOut, ChefHat, Printer, Contact, Gift, CalendarClock, Settings, ChevronDown, Wallet, Sun, Moon,
+  Users, BarChart3, LogOut, Printer, Contact, Gift, CalendarClock, Settings, ChevronDown, Wallet, Sun, Moon,
 } from "lucide-react";
+import logo from "@/assets/myata-logo.png";
 
 // Плоский аккордеон (как у Poster): один открытый раздел — плоский список
 // внутри, без дальнейшей вложенности. Отдельно от групп — "Панель управления"
@@ -80,9 +81,7 @@ export default function AdminLayout() {
     <div className="min-h-screen bg-[var(--bg)]">
       <aside className="w-64 fixed left-0 top-0 h-full border-r border-[var(--border)] bg-[var(--bg)] flex flex-col">
         <div className="flex items-center gap-3 px-6 h-16 border-b border-[var(--border)]">
-          <div className="w-9 h-9 rounded-lg bg-[var(--accent)] flex items-center justify-center shrink-0">
-            <ChefHat size={20} className="text-white" />
-          </div>
+          <img src={logo} alt="Мята" className="w-9 h-9 object-contain shrink-0" />
           <span className="font-head text-lg font-extrabold text-[var(--ink)]">RestoControl</span>
         </div>
         <div className="px-3 pt-3">

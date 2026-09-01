@@ -6,11 +6,12 @@ import { useAuth } from "@/context/AuthContext";
 import { usePosStore } from "@/store/posStore";
 import { toast } from "sonner";
 import {
-  ChefHat, LogOut, Plus, Minus, Trash2, Send, CreditCard, Grid3x3,
+  LogOut, Plus, Minus, Trash2, Send, CreditCard, Grid3x3,
   ArrowLeft, Power, Printer, Banknote, X, Utensils, Search,
   Receipt, ArrowRightLeft, Scissors, Check, AlertTriangle, MessageSquare, Wallet,
   User, Tag,
 } from "lucide-react";
+import logo from "@/assets/myata-logo.png";
 import { FloorPlan, hallsOf, sortTablesForList, tableStateClasses } from "@/components/admin/FloorPlan";
 import { StatusIndicators } from "@/components/StatusIndicators";
 import { useConnectionStatus } from "@/hooks/useConnectionStatus";
@@ -1291,7 +1292,7 @@ function PosTopBar({ user, shift, onLogout, onCloseShift, onCash, floating, pend
   return (
     <div className={`h-14 sm:h-16 border-b border-[#27272A] bg-[#0A0A0A] flex items-center justify-between px-3 sm:px-6 gap-2 ${floating ? "w-full absolute top-0" : ""}`}>
       <div className="flex items-center gap-2 sm:gap-3 min-w-0 overflow-hidden flex-1">
-        <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-[#FF5A00] flex items-center justify-center shrink-0"><ChefHat size={18} /></div>
+        <img src={logo} alt="Мята" className="w-11 h-11 sm:w-12 sm:h-12 object-contain shrink-0" />
         <span className="hidden sm:inline font-head text-lg font-extrabold whitespace-nowrap shrink-0">RestoControl</span>
         <div className="flex flex-col leading-tight min-w-0" data-testid="pos-user-name">
           <span className="text-[10px] text-[#71717A] truncate">{ROLE_LABELS[user.role] || user.role}</span>
