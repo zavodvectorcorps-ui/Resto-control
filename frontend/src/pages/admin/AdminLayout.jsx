@@ -2,6 +2,7 @@ import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useState, useEffect } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { useTheme } from "@/context/ThemeContext";
+import { StatusIndicators } from "@/components/StatusIndicators";
 import api from "@/lib/api";
 import {
   LayoutDashboard, UtensilsCrossed, Factory, Grid3x3, Warehouse,
@@ -83,6 +84,9 @@ export default function AdminLayout() {
             <ChefHat size={20} className="text-white" />
           </div>
           <span className="font-head text-lg font-extrabold text-[var(--ink)]">RestoControl</span>
+        </div>
+        <div className="px-3 pt-3">
+          <StatusIndicators variant="admin" />
         </div>
         {restaurants.length > 1 && (
           <div className="px-3 pt-3">

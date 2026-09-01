@@ -11,6 +11,10 @@ import {
   Receipt, ArrowRightLeft, Scissors, Check, AlertTriangle, MessageSquare, Wallet,
 } from "lucide-react";
 import { FloorPlan, hallsOf } from "@/components/admin/FloorPlan";
+import { StatusIndicators } from "@/components/StatusIndicators";
+import { useConnectionStatus } from "@/hooks/useConnectionStatus";
+import { useOfflineQueueFlush } from "@/hooks/useOfflineQueueFlush";
+import { enqueue as enqueueOffline, isNetworkError, isQueued as isQueuedOffline } from "@/lib/offlineQueue";
 
 const money = (n) => `${Number(n || 0).toFixed(2)} ₽`;
 
@@ -19,6 +23,7 @@ export default function Pos() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const store = usePosStore();
+  const online = useConnectionStatus();
 
   const [view, setView] = useState("tables"); // tables | order
   const [activeHall, setActiveHall] = useState(null);
@@ -72,6 +77,7 @@ export default function Pos() {
 
   const { data: shift, refetch: refetchShift } = useQuery({ queryKey: ["shift"], queryFn: async () => (await api.get("/shifts/current")).data });
   const { data: tables = [], refetch: refetchTables } = useQuery({ queryKey: ["pos-tables"], queryFn: async () => (await api.get("/tables")).data, refetchInterval: 4000 });
+  const pendingSyncCount = useOfflineQueueFlush(online, refetchTables);
   const posHalls = useMemo(() => hallsOf(tables), [tables]);
   useEffect(() => {
     if (posHalls.length && !posHalls.includes(activeHall)) setActiveHall(posHalls[0]);
@@ -128,24 +134,29 @@ export default function Pos() {
     setView("order");
   };
 
-  const saveOrder = async () => {
+  const saveOrderRaw = async () => {
     const items = store.cart;
     if (items.length === 0) { toast.error("Добавьте позиции"); return null; }
+    if (store.orderId) {
+      await api.put(`/orders/${store.orderId}`, { items });
+      return store.orderId;
+    }
+    const { data } = await api.post("/orders", { table_id: store.tableId, items });
+    store.setOrder(data.id);
+    return data.id;
+  };
+
+  const saveOrder = async () => {
     try {
-      if (store.orderId) {
-        await api.put(`/orders/${store.orderId}`, { items });
-        return store.orderId;
-      } else {
-        const { data } = await api.post("/orders", { table_id: store.tableId, items });
-        store.setOrder(data.id);
-        return data.id;
-      }
+      return await saveOrderRaw();
     } catch (e) { toast.error(apiErr(e)); return null; }
   };
 
   const sendKitchen = async () => {
+    const items = store.cart;
+    if (items.length === 0) { toast.error("Добавьте позиции"); return; }
     try {
-      const id = await saveOrder();
+      const id = await saveOrderRaw();
       if (!id) return;
       const { data } = await api.post(`/orders/${id}/send`);
       setTickets(data.tickets && data.tickets.length ? data.tickets : null);
@@ -153,7 +164,14 @@ export default function Pos() {
       store.loadCart(order.items, id, store.tableId, store.tableName);
       refetchTables();
       toast.success("Заказ отправлен на кухню");
-    } catch (e) { toast.error(apiErr(e)); }
+    } catch (e) {
+      if (isNetworkError(e)) {
+        enqueueOffline({ kind: "send", tableId: store.tableId, tableName: store.tableName, orderId: store.orderId, items });
+        toast.error("Нет связи — заказ поставлен в очередь, отправится на кухню автоматически", { duration: 6000 });
+        return;
+      }
+      toast.error(apiErr(e));
+    }
   };
 
   const fireCourse = async (courseNumber) => {
@@ -311,17 +329,20 @@ export default function Pos() {
 
   const executePay = async (riskReason) => {
     setDebtWarn(null);
-    const id = await saveOrder();
-    if (!id) return;
+    const items = store.cart;
+    const payBody = {
+      payment_method: pay, discount: Number(discount),
+      client_id: client?.id || null,
+      discount_source: discountSource || (Number(discount) > 0 ? "manual" : null),
+      bonus_redeem_amount: Number(bonusRedeem || 0),
+      reason: riskReason || undefined,
+    };
+    let id = store.orderId;
     try {
+      id = await saveOrderRaw();
+      if (!id) return;
       await api.patch(`/orders/${id}/service-charge`, { enabled: scEnabled });
-      const { data } = await api.post(`/orders/${id}/pay`, {
-        payment_method: pay, discount: Number(discount),
-        client_id: client?.id || null,
-        discount_source: discountSource || (Number(discount) > 0 ? "manual" : null),
-        bonus_redeem_amount: Number(bonusRedeem || 0),
-        reason: riskReason || undefined,
-      });
+      const { data } = await api.post(`/orders/${id}/pay`, payBody);
       setReceipt(data);
       setCheckout(false);
       setDiscount(0); setClient(null); setClientPhone(""); setDiscountSource(null); setBonusRedeem("");
@@ -332,6 +353,16 @@ export default function Pos() {
       qc.invalidateQueries({ queryKey: ["dashboard"] });
       toast.success("Оплачено");
     } catch (e) {
+      if (isNetworkError(e)) {
+        enqueueOffline({ kind: "pay", tableId: store.tableId, tableName: store.tableName, orderId: store.orderId, items, payBody, scEnabled });
+        setCheckout(false);
+        setDiscount(0); setClient(null); setClientPhone(""); setDiscountSource(null); setBonusRedeem("");
+        setDiscountRisk(null); setDiscountRiskReason("");
+        store.clear();
+        setView("tables");
+        toast.success("Нет связи — оплата записана, гостя можно отпускать. Чек и синхронизация — как только появится связь", { duration: 8000 });
+        return;
+      }
       const msg = apiErr(e);
       if (msg.includes("Пречек уже печатался")) {
         setDiscountRisk(id);
@@ -494,7 +525,7 @@ export default function Pos() {
   if (shift === null) {
     return (
       <div className="h-screen flex flex-col items-center justify-center bg-[#0A0A0A] text-white">
-        <PosTopBar user={user} shift={shift} onLogout={() => { logout(); nav("/login"); }} onCloseShift={closeShift} floating />
+        <PosTopBar user={user} shift={shift} onLogout={() => { logout(); nav("/login"); }} onCloseShift={closeShift} pendingSyncCount={pendingSyncCount} floating />
         {zReportModal}
         {openCashModal}
         <div className="text-center fade-up">
@@ -631,7 +662,7 @@ export default function Pos() {
 
   return (
     <div className="h-screen flex flex-col bg-[#0A0A0A] text-white overflow-hidden">
-      <PosTopBar user={user} shift={shift} onLogout={() => { logout(); nav("/login"); }} onCloseShift={closeShift} onCash={() => { setCashAmt(""); setCashReason(""); setCashMove({ type: "in" }); }} />
+      <PosTopBar user={user} shift={shift} onLogout={() => { logout(); nav("/login"); }} onCloseShift={closeShift} onCash={() => { setCashAmt(""); setCashReason(""); setCashMove({ type: "in" }); }} pendingSyncCount={pendingSyncCount} />
 
       {view === "tables" ? (
         <div className="flex-1 flex flex-col overflow-hidden p-5 pb-4">
@@ -655,15 +686,22 @@ export default function Pos() {
               <FloorPlan hall={activeHall} tables={tables.filter((t) => t.hall === activeHall)} mode="select" variant="pos" fit="height"
                 isMine={(t) => t.open_order?.waiter_id === user.id}
                 onSelect={selectTable}
-                renderExtra={(t) => t.open_orders && t.open_orders.length ? (
+                renderExtra={(t) => (
                   <>
-                    <div className="text-[11px] font-semibold tabnum text-inherit">
-                      {money(t.open_total)}{t.open_orders.length > 1 ? ` · ${t.open_orders.length}сч` : ""}
-                    </div>
+                    {isQueuedOffline(t.id) && (
+                      <div className="text-[9px] font-bold text-[#FACC15] flex items-center gap-0.5" title="Есть несинхронизированные данные">
+                        <Send size={9} /> офлайн
+                      </div>
+                    )}
+                    {t.open_orders && t.open_orders.length ? (
+                      <div className="text-[11px] font-semibold tabnum text-inherit">
+                        {money(t.open_total)}{t.open_orders.length > 1 ? ` · ${t.open_orders.length}сч` : ""}
+                      </div>
+                    ) : !t.is_service ? (
+                      <div className="text-[10px] text-[#52525B]">своб.</div>
+                    ) : null}
                   </>
-                ) : !t.is_service ? (
-                  <div className="text-[10px] text-[#52525B]">своб.</div>
-                ) : null}
+                )}
               />
             )}
           </div>
@@ -1210,7 +1248,7 @@ export default function Pos() {
   );
 }
 
-function PosTopBar({ user, shift, onLogout, onCloseShift, onCash, floating }) {
+function PosTopBar({ user, shift, onLogout, onCloseShift, onCash, floating, pendingSyncCount }) {
   return (
     <div className={`h-16 border-b border-[#27272A] bg-[#0A0A0A] flex items-center justify-between px-6 ${floating ? "w-full absolute top-0" : ""}`}>
       <div className="flex items-center gap-3">
@@ -1219,6 +1257,13 @@ function PosTopBar({ user, shift, onLogout, onCloseShift, onCash, floating }) {
         {shift && <span className="ml-3 text-xs px-2 py-1 rounded-md bg-[#00E67611] text-[#00E676] font-semibold">Смена открыта</span>}
       </div>
       <div className="flex items-center gap-4">
+        {!!pendingSyncCount && (
+          <span data-testid="pending-sync-badge" title="Заказы/оплаты, ожидающие отправки на сервер"
+            className="text-xs px-2 py-1 rounded-md bg-[#FACC1511] text-[#FACC15] font-semibold flex items-center gap-1.5">
+            <Send size={12} /> В очереди: {pendingSyncCount}
+          </span>
+        )}
+        <StatusIndicators variant="pos" />
         <span className="text-sm text-[#A1A1AA]">{user.name}</span>
         {shift && user.role === "admin" && onCash && (
           <button onClick={onCash} data-testid="cash-move-btn" className="text-sm text-[#A1A1AA] hover:text-[#FACC15] flex items-center gap-1">
